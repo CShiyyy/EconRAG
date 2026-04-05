@@ -330,6 +330,7 @@ class TestNews:
         assert newsdata_health.status == "rate_limited"
 
 
+from pipeline.ingestion.parser import parse_urls
 from pipeline.ingestion.social import fetch_social
 
 
@@ -394,3 +395,77 @@ class TestSocial:
         assert isinstance(hits, list)
         assert health.status == "success"
         assert health.items_fetched == 0
+
+
+class TestParser:
+    def test_parse_single_url_success(self):
+        """Mock Crawl4AI to return markdown for a URL."""
+        mock_result = MagicMock()
+        mock_result.markdown = "# Article Title\n\nArticle content here."
+        mock_result.success = True
+
+        mock_crawler = AsyncMock()
+        mock_crawler.arun.return_value = mock_result
+        mock_crawler.__aenter__ = AsyncMock(return_value=mock_crawler)
+        mock_crawler.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("pipeline.ingestion.parser.AsyncWebCrawler", return_value=mock_crawler):
+            results, health = asyncio.run(parse_urls(["https://example.com/article"]))
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert "Article Title" in results[0].markdown
+        assert health.status == "success"
+        assert health.items_fetched == 1
+
+    def test_parse_url_failure(self):
+        """Failed URL produces ParsedContent with success=False."""
+        mock_result = MagicMock()
+        mock_result.markdown = ""
+        mock_result.success = False
+        mock_result.error_message = "Connection timeout"
+
+        mock_crawler = AsyncMock()
+        mock_crawler.arun.return_value = mock_result
+        mock_crawler.__aenter__ = AsyncMock(return_value=mock_crawler)
+        mock_crawler.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("pipeline.ingestion.parser.AsyncWebCrawler", return_value=mock_crawler):
+            results, health = asyncio.run(parse_urls(["https://example.com/broken"]))
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].error is not None
+
+    def test_parse_empty_list(self):
+        """Empty URL list returns empty results + success health."""
+        results, health = asyncio.run(parse_urls([]))
+        assert results == []
+        assert health.status == "success"
+        assert health.items_fetched == 0
+
+    def test_parse_mixed_success_failure(self):
+        """Mix of successful and failed URLs."""
+        success_result = MagicMock()
+        success_result.markdown = "# Good"
+        success_result.success = True
+
+        fail_result = MagicMock()
+        fail_result.markdown = ""
+        fail_result.success = False
+        fail_result.error_message = "404"
+
+        mock_crawler = AsyncMock()
+        mock_crawler.arun.side_effect = [success_result, fail_result]
+        mock_crawler.__aenter__ = AsyncMock(return_value=mock_crawler)
+        mock_crawler.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("pipeline.ingestion.parser.AsyncWebCrawler", return_value=mock_crawler):
+            results, health = asyncio.run(
+                parse_urls(["https://example.com/good", "https://example.com/bad"])
+            )
+
+        assert len(results) == 2
+        assert results[0].success is True
+        assert results[1].success is False
+        assert health.items_fetched == 1
