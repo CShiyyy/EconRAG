@@ -1,0 +1,32 @@
+[project]
+name = "econrag"
+version = "0.1.0"
+description = "Autonomous Portfolio Monitoring Agent"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "pandas>=2.1",
+    "lxml>=5.0",
+    "beautifulsoup4>=4.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "network: tests that require internet access (deselect with '-m not network')",
+]
