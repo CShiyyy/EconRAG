@@ -34,6 +34,7 @@ include = ["pipeline*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
 markers = [
     "network: tests that require internet access (deselect with '-m not network')",
 ]
