@@ -4,6 +4,14 @@ import json
 import pytest
 
 from tests.conftest import MOCK_WATCHLIST
+from pipeline.knowledge.validator import (
+    ValidatedEntity,
+    ValidatedRelationship,
+    ValidationResult,
+    validate_extraction,
+    VALID_ENTITY_TYPES,
+    VALID_RELATIONSHIP_TYPES,
+)
 
 
 @pytest.fixture
@@ -123,3 +131,167 @@ class TestCanonicalResolution:
         assert validate_canonical_id_format("NVDA", "PERSON") is False
         assert validate_canonical_id_format("no_prefix", "SECTOR") is False
         assert validate_canonical_id_format("event:baddate:slug", "EVENT") is False
+
+
+@pytest.fixture
+def sample_extraction():
+    """A realistic raw extraction result dict."""
+    return {
+        "entities": [
+            {
+                "entity_name": "NVIDIA",
+                "entity_type": "COMPANY",
+                "proposed_canonical_id": "NVDA",
+                "description": "Leading GPU manufacturer",
+            },
+            {
+                "entity_name": "Jensen Huang",
+                "entity_type": "PERSON",
+                "proposed_canonical_id": "person:jensen_huang",
+                "description": "CEO of Nvidia",
+            },
+            {
+                "entity_name": "Q1 2026 Earnings",
+                "entity_type": "EVENT",
+                "proposed_canonical_id": "event:20260401:nvda_q1_earnings",
+                "description": "Nvidia Q1 FY2026 earnings report",
+            },
+        ],
+        "relationships": [
+            {
+                "src_entity": "NVIDIA",
+                "tgt_entity": "Q1 2026 Earnings",
+                "relationship_type": "AFFECTED_BY_EVENT",
+                "description": "Nvidia affected by earnings report",
+                "significance_score": 0.8,
+                "attributes": {},
+            },
+            {
+                "src_entity": "Q1 2026 Earnings",
+                "tgt_entity": "Jensen Huang",
+                "relationship_type": "ANNOUNCED_BY",
+                "description": "Earnings announced by Jensen Huang",
+                "significance_score": 0.6,
+                "attributes": {},
+            },
+        ],
+    }
+
+
+@pytest.fixture
+def extraction_with_untyped():
+    """Extraction with UNTYPED and invalid types."""
+    return {
+        "entities": [
+            {
+                "entity_name": "NVIDIA",
+                "entity_type": "COMPANY",
+                "proposed_canonical_id": "NVDA",
+                "description": "GPU maker",
+            },
+            {
+                "entity_name": "Some Widget",
+                "entity_type": "GADGET",  # invalid type
+                "proposed_canonical_id": "gadget:widget",
+                "description": "Unknown thing",
+            },
+        ],
+        "relationships": [
+            {
+                "src_entity": "NVIDIA",
+                "tgt_entity": "Some Widget",
+                "relationship_type": "UNTYPED",
+                "description": "Some vague connection",
+                "significance_score": 0.3,
+                "attributes": {},
+            },
+            {
+                "src_entity": "NVIDIA",
+                "tgt_entity": "Some Widget",
+                "relationship_type": "INVENTED_BY",  # invalid type
+                "description": "Not a valid relationship",
+                "significance_score": 0.2,
+                "attributes": {},
+            },
+        ],
+    }
+
+
+class TestValidator:
+    def test_valid_extraction_produces_entities_and_rels(self, seeded_db, sample_extraction):
+        result = validate_extraction(sample_extraction, seeded_db, run_id=1)
+        assert len(result.entities) == 3
+        assert len(result.relationships) == 2
+        assert len(result.untyped_edges) == 0
+        assert len(result.rejected_entities) == 0
+
+    def test_invalid_entity_type_rejected(self, seeded_db, extraction_with_untyped):
+        result = validate_extraction(extraction_with_untyped, seeded_db, run_id=1)
+        assert len(result.rejected_entities) == 1
+        assert result.rejected_entities[0]["entity_type"] == "GADGET"
+
+    def test_untyped_edges_logged_separately(self, seeded_db, extraction_with_untyped):
+        result = validate_extraction(extraction_with_untyped, seeded_db, run_id=1)
+        assert len(result.untyped_edges) == 1
+        assert result.untyped_edges[0]["relationship_type"] == "UNTYPED"
+
+    def test_invalid_relationship_type_rejected(self, seeded_db, extraction_with_untyped):
+        result = validate_extraction(extraction_with_untyped, seeded_db, run_id=1)
+        assert len(result.rejected_relationships) == 1
+        assert result.rejected_relationships[0]["relationship_type"] == "INVENTED_BY"
+
+    def test_tier2_gets_temporal_metadata(self, seeded_db, sample_extraction):
+        result = validate_extraction(sample_extraction, seeded_db, run_id=42)
+        # AFFECTED_BY_EVENT is Tier 2
+        tier2_rels = [r for r in result.relationships if r.tier == 2]
+        assert len(tier2_rels) > 0
+        for rel in tier2_rels:
+            assert rel.extracted_at is not None
+            assert rel.source_run_id == 42
+            assert rel.effective_ttl_hours is not None
+
+    def test_tier1_no_ttl(self, seeded_db):
+        """Tier 1 relationships should not have TTL metadata."""
+        raw = {
+            "entities": [
+                {"entity_name": "NVIDIA", "entity_type": "COMPANY",
+                 "proposed_canonical_id": "NVDA", "description": "GPU maker"},
+                {"entity_name": "Semiconductors", "entity_type": "SECTOR",
+                 "proposed_canonical_id": "sector:semiconductors", "description": "Chip sector"},
+            ],
+            "relationships": [
+                {"src_entity": "NVIDIA", "tgt_entity": "Semiconductors",
+                 "relationship_type": "BELONGS_TO_SECTOR", "description": "NVDA is in semis",
+                 "significance_score": 1.0, "attributes": {}},
+            ],
+        }
+        result = validate_extraction(raw, seeded_db, run_id=1)
+        assert len(result.relationships) == 1
+        rel = result.relationships[0]
+        assert rel.tier == 1
+        assert rel.effective_ttl_hours is None
+
+    def test_effective_ttl_calculation(self, seeded_db, sample_extraction):
+        result = validate_extraction(sample_extraction, seeded_db, run_id=1, base_ttl_hours=48)
+        tier2_rels = [r for r in result.relationships if r.tier == 2]
+        for rel in tier2_rels:
+            expected = 48 * (1 + rel.significance_score)
+            assert rel.effective_ttl_hours == pytest.approx(expected)
+
+    def test_significance_score_clamped(self, seeded_db):
+        """Significance scores outside 0-1 should be clamped."""
+        raw = {
+            "entities": [
+                {"entity_name": "NVIDIA", "entity_type": "COMPANY",
+                 "proposed_canonical_id": "NVDA", "description": "GPU maker"},
+                {"entity_name": "Big Event", "entity_type": "EVENT",
+                 "proposed_canonical_id": "event:20260401:big_event", "description": "Big"},
+            ],
+            "relationships": [
+                {"src_entity": "NVIDIA", "tgt_entity": "Big Event",
+                 "relationship_type": "AFFECTED_BY_EVENT", "description": "Affected",
+                 "significance_score": 1.5, "attributes": {}},
+            ],
+        }
+        result = validate_extraction(raw, seeded_db, run_id=1)
+        assert result.relationships[0].significance_score == 1.0
