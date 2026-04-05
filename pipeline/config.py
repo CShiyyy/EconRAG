@@ -37,3 +37,13 @@ DEFAULT_CONSTRAINTS: dict[str, tuple[float, str]] = {
     "max_sector_concentration": (0.35, "Maximum combined weight for all tickers in one sector."),
     "min_position_size": (0.02, "Below this weight, a position is not worth opening."),
 }
+
+# --- Knowledge Graph config ---
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+OLLAMA_EMBED_DIM: int = int(os.getenv("OLLAMA_EMBED_DIM", "768"))
+LIGHTRAG_STORAGE_DIR: Path = DATA_DIR / "lightrag_store"
+EXTRACTION_TEMPERATURE: float = 0.1
+EXTRACTION_MAX_TOKENS: int = 8192
+EPHEMERAL_BASE_TTL_HOURS: int = 48
