@@ -330,6 +330,7 @@ class TestNews:
         assert newsdata_health.status == "rate_limited"
 
 
+from pipeline.ingestion.orchestrator import _apply_volume_caps, run_ingestion
 from pipeline.ingestion.parser import parse_urls
 from pipeline.ingestion.social import fetch_social
 
@@ -469,3 +470,118 @@ class TestParser:
         assert results[0].success is True
         assert results[1].success is False
         assert health.items_fetched == 1
+
+
+class TestOrchestrator:
+    def test_volume_cap_news(self):
+        """50 news hits for one ticker capped to 20."""
+        hits = [
+            NewsHit(
+                ticker="AAPL",
+                headline=f"Article {i}",
+                url=f"https://example.com/article-{i}",
+                source="yfinance",
+                published_at=f"2026-04-06T{10 + (i % 12):02d}:00:00Z",
+            )
+            for i in range(50)
+        ]
+        capped = _apply_volume_caps(news_hits=hits, social_hits=[], max_news=20, max_social=30)
+        news_for_aapl = [h for h in capped["news"] if h.ticker == "AAPL"]
+        assert len(news_for_aapl) == 20
+
+    def test_volume_cap_social(self):
+        """40 social hits for one ticker capped to 30."""
+        hits = [
+            SocialHit(
+                ticker="NVDA",
+                title=f"Post {i}",
+                body="",
+                url=f"https://reddit.com/r/stocks/{i}",
+                score=100 - i,
+                subreddit="stocks",
+                posted_at=f"2026-04-06T{10 + (i % 12):02d}:00:00Z",
+            )
+            for i in range(40)
+        ]
+        capped = _apply_volume_caps(news_hits=[], social_hits=hits, max_news=20, max_social=30)
+        social_for_nvda = [h for h in capped["social"] if h.ticker == "NVDA"]
+        assert len(social_for_nvda) == 30
+        # Highest scores should be kept (sorted by score desc)
+        scores = [h.score for h in social_for_nvda]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_url_dedup(self):
+        """Same URL under two tickers: collected once in unique_urls."""
+        shared_url = "https://example.com/shared"
+        news_hits = [
+            NewsHit("AAPL", "Shared article", shared_url, "yfinance", "2026-04-06T10:00:00Z"),
+            NewsHit("MSFT", "Shared article", shared_url, "yfinance", "2026-04-06T10:00:00Z"),
+        ]
+        social_hits = [
+            SocialHit("AAPL", "Shared post", "", shared_url, 100, "stocks", "2026-04-06T10:00:00Z"),
+        ]
+        capped = _apply_volume_caps(news_hits=news_hits, social_hits=social_hits, max_news=20, max_social=30)
+        unique_urls = capped["unique_urls"]
+        assert unique_urls.count(shared_url) == 1
+
+    def test_full_orchestrator(self):
+        """Mock all scrapers, run orchestrator, verify IngestionResult shape."""
+        mock_market = (
+            {"AAPL": MarketDataPoint("AAPL", 175.0, 174.0, 173.0, 28.0, 2.8e12, [170.0], "2026-04-06T16:00:00Z")},
+            SourceHealth("yfinance", "success", 1, 500),
+        )
+        mock_news = (
+            [NewsHit("AAPL", "News", "https://example.com/1", "yfinance", "2026-04-06T10:00:00Z")],
+            [SourceHealth("yfinance_news", "success", 1, 300)],
+        )
+        mock_social = (
+            [],
+            SourceHealth("reddit", "error", 0, 0, "Reddit credentials not configured"),
+        )
+        mock_parsed = (
+            [ParsedContent("https://example.com/1", "# News", "2026-04-06T16:00:00Z", True, None)],
+            SourceHealth("crawl4ai", "success", 1, 2000),
+        )
+
+        with (
+            patch("pipeline.ingestion.orchestrator.fetch_market_data", AsyncMock(return_value=mock_market)),
+            patch("pipeline.ingestion.orchestrator.fetch_news", AsyncMock(return_value=mock_news)),
+            patch("pipeline.ingestion.orchestrator.fetch_social", AsyncMock(return_value=mock_social)),
+            patch("pipeline.ingestion.orchestrator.parse_urls", AsyncMock(return_value=mock_parsed)),
+        ):
+            result = asyncio.run(run_ingestion(["AAPL"]))
+
+        assert "AAPL" in result.market_data
+        assert len(result.news_hits) == 1
+        assert len(result.parsed_content) == 1
+        assert len(result.health) == 4  # yfinance, yfinance_news, reddit, crawl4ai
+
+    def test_orchestrator_scraper_failure_doesnt_block(self):
+        """One scraper crashing doesn't block others."""
+        mock_market = (
+            {},
+            SourceHealth("yfinance", "error", 0, 0, "crash"),
+        )
+        mock_news = (
+            [NewsHit("AAPL", "News", "https://example.com/1", "yfinance", "2026-04-06T10:00:00Z")],
+            [SourceHealth("yfinance_news", "success", 1, 300)],
+        )
+        mock_social = (
+            [],
+            SourceHealth("reddit", "error", 0, 0, "Reddit credentials not configured"),
+        )
+        mock_parsed = (
+            [ParsedContent("https://example.com/1", "# News", "2026-04-06T16:00:00Z", True, None)],
+            SourceHealth("crawl4ai", "success", 1, 2000),
+        )
+
+        with (
+            patch("pipeline.ingestion.orchestrator.fetch_market_data", AsyncMock(return_value=mock_market)),
+            patch("pipeline.ingestion.orchestrator.fetch_news", AsyncMock(return_value=mock_news)),
+            patch("pipeline.ingestion.orchestrator.fetch_social", AsyncMock(return_value=mock_social)),
+            patch("pipeline.ingestion.orchestrator.parse_urls", AsyncMock(return_value=mock_parsed)),
+        ):
+            result = asyncio.run(run_ingestion(["AAPL"]))
+
+        assert isinstance(result, IngestionResult)
+        assert len(result.news_hits) == 1
