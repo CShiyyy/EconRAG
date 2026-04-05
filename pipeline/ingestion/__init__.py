@@ -8,7 +8,6 @@ from pipeline.ingestion.models import (
     SocialHit,
     SourceHealth,
 )
-from pipeline.ingestion.orchestrator import run_ingestion
 
 __all__ = [
     "IngestionResult",
@@ -19,3 +18,10 @@ __all__ = [
     "SourceHealth",
     "run_ingestion",
 ]
+
+
+def __getattr__(name: str):
+    if name == "run_ingestion":
+        from pipeline.ingestion.orchestrator import run_ingestion
+        return run_ingestion
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
