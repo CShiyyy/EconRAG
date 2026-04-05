@@ -328,3 +328,69 @@ class TestNews:
 
         newsdata_health = next(h for h in healths if h.source == "newsdata")
         assert newsdata_health.status == "rate_limited"
+
+
+from pipeline.ingestion.social import fetch_social
+
+
+class TestSocial:
+    def test_missing_credentials(self):
+        """No credentials returns empty + error health."""
+        hits, health = asyncio.run(
+            fetch_social(["AAPL"], subreddits=["stocks"], client_id=None, client_secret=None)
+        )
+        assert hits == []
+        assert health.status == "error"
+        assert "credentials" in health.error_detail.lower()
+
+    def test_fetch_social_posts(self):
+        """Mock PRAW to return posts."""
+        mock_submission = MagicMock()
+        mock_submission.title = "$NVDA earnings beat"
+        mock_submission.selftext = "DD on NVDA..."
+        mock_submission.url = "https://reddit.com/r/stocks/abc"
+        mock_submission.score = 250
+        mock_submission.created_utc = time.time() - 3600  # 1 hour ago
+
+        mock_subreddit = MagicMock()
+        mock_subreddit.search.return_value = [mock_submission]
+
+        mock_reddit = MagicMock()
+        mock_reddit.subreddit.return_value = mock_subreddit
+
+        with patch("pipeline.ingestion.social.praw.Reddit", return_value=mock_reddit):
+            hits, health = asyncio.run(
+                fetch_social(
+                    ["NVDA"],
+                    subreddits=["stocks"],
+                    client_id="test_id",
+                    client_secret="test_secret",
+                )
+            )
+
+        assert len(hits) >= 1
+        assert hits[0].ticker == "NVDA"
+        assert hits[0].subreddit == "stocks"
+        assert health.status == "success"
+
+    def test_subreddit_unavailable(self):
+        """Unavailable subreddit is skipped, not crash."""
+        mock_subreddit = MagicMock()
+        mock_subreddit.search.side_effect = Exception("subreddit is quarantined")
+
+        mock_reddit = MagicMock()
+        mock_reddit.subreddit.return_value = mock_subreddit
+
+        with patch("pipeline.ingestion.social.praw.Reddit", return_value=mock_reddit):
+            hits, health = asyncio.run(
+                fetch_social(
+                    ["AAPL"],
+                    subreddits=["wallstreetbets"],
+                    client_id="test_id",
+                    client_secret="test_secret",
+                )
+            )
+
+        assert isinstance(hits, list)
+        assert health.status == "success"
+        assert health.items_fetched == 0
