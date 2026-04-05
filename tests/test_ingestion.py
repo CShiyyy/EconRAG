@@ -1,5 +1,7 @@
 """Tests for the Data Ingestion Layer (Phase 3)."""
 
+import time
+
 from pipeline.ingestion.models import (
     IngestionResult,
     MarketDataPoint,
@@ -179,3 +181,150 @@ class TestMarketData:
         # _fetch_single_ticker catches the exception and returns None
         assert data["AAPL"] is None
         assert health.status == "success"  # timed_health wraps the loop, individual failures don't crash it
+
+
+from unittest.mock import AsyncMock
+
+import httpx
+
+from pipeline.ingestion.news import fetch_news
+
+
+class TestNews:
+    def test_yfinance_news_only(self):
+        """When no API key, only yfinance news is fetched."""
+        recent_ts = int(time.time()) - 3600  # 1 hour ago
+        mock_ticker = MagicMock()
+        mock_ticker.news = [
+            {
+                "title": "Apple beats earnings",
+                "link": "https://example.com/aapl-earnings",
+                "publisher": "Reuters",
+                "providerPublishTime": recent_ts,
+            },
+        ]
+
+        with patch("pipeline.ingestion.news.yf.Ticker", return_value=mock_ticker):
+            hits, healths = asyncio.run(fetch_news(["AAPL"], api_key=None))
+
+        assert len(hits) >= 1
+        assert hits[0].source == "yfinance"
+        assert any(h.source == "yfinance_news" for h in healths)
+        assert not any(h.source == "newsdata" for h in healths)
+
+    def test_newsdata_integration(self):
+        """When API key provided, both sources run and results merge."""
+        recent_ts = int(time.time()) - 3600  # 1 hour ago
+        mock_ticker = MagicMock()
+        mock_ticker.news = [
+            {
+                "title": "AAPL from yfinance",
+                "link": "https://example.com/yf-aapl",
+                "publisher": "AP",
+                "providerPublishTime": recent_ts,
+            },
+        ]
+
+        newsdata_response = httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "results": [
+                    {
+                        "title": "AAPL from newsdata",
+                        "link": "https://example.com/nd-aapl",
+                        "source_id": "reuters",
+                        "pubDate": "2026-04-06 10:00:00",
+                    },
+                ],
+            },
+            request=httpx.Request("GET", "https://newsdata.io/api/1/latest"),
+        )
+
+        with (
+            patch("pipeline.ingestion.news.yf.Ticker", return_value=mock_ticker),
+            patch("pipeline.ingestion.news.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=newsdata_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            hits, healths = asyncio.run(fetch_news(["AAPL"], api_key="test_key"))
+
+        sources = {h.source for h in hits}
+        assert "yfinance" in sources
+        assert "newsdata" in sources
+        assert len(healths) == 2
+
+    def test_newsdata_url_dedup(self):
+        """Same URL from both sources is deduplicated."""
+        recent_ts = int(time.time()) - 3600  # 1 hour ago
+        shared_url = "https://example.com/shared-article"
+        mock_ticker = MagicMock()
+        mock_ticker.news = [
+            {
+                "title": "Shared article",
+                "link": shared_url,
+                "publisher": "AP",
+                "providerPublishTime": recent_ts,
+            },
+        ]
+
+        newsdata_response = httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "results": [
+                    {
+                        "title": "Shared article",
+                        "link": shared_url,
+                        "source_id": "ap",
+                        "pubDate": "2026-04-06 10:00:00",
+                    },
+                ],
+            },
+            request=httpx.Request("GET", "https://newsdata.io/api/1/latest"),
+        )
+
+        with (
+            patch("pipeline.ingestion.news.yf.Ticker", return_value=mock_ticker),
+            patch("pipeline.ingestion.news.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=newsdata_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            hits, _ = asyncio.run(fetch_news(["AAPL"], api_key="test_key"))
+
+        urls = [h.url for h in hits]
+        assert urls.count(shared_url) == 1
+
+    def test_newsdata_rate_limit(self):
+        """429 response produces rate_limited health."""
+        mock_ticker = MagicMock()
+        mock_ticker.news = []
+
+        newsdata_response = httpx.Response(
+            429,
+            json={"status": "error", "results": {"message": "Rate limit exceeded"}},
+            request=httpx.Request("GET", "https://newsdata.io/api/1/latest"),
+        )
+
+        with (
+            patch("pipeline.ingestion.news.yf.Ticker", return_value=mock_ticker),
+            patch("pipeline.ingestion.news.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=newsdata_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            hits, healths = asyncio.run(fetch_news(["AAPL"], api_key="test_key"))
+
+        newsdata_health = next(h for h in healths if h.source == "newsdata")
+        assert newsdata_health.status == "rate_limited"
