@@ -71,3 +71,57 @@ class TestModels:
         )
         assert isinstance(result.market_data, dict)
         assert isinstance(result.health, list)
+
+
+import asyncio
+
+from pipeline.ingestion.health import aggregate_health, timed_health
+
+
+class TestHealth:
+    def test_aggregate_health_success(self):
+        health_list = [
+            SourceHealth("yfinance", "success", 30, 1200),
+            SourceHealth("newsdata", "success", 50, 800),
+        ]
+        result = aggregate_health(health_list)
+        assert result["yfinance"]["status"] == "success"
+        assert result["newsdata"]["items_fetched"] == 50
+
+    def test_aggregate_health_mixed(self):
+        health_list = [
+            SourceHealth("yfinance", "success", 30, 1200),
+            SourceHealth("reddit", "error", 0, 0, "Reddit credentials not configured"),
+        ]
+        result = aggregate_health(health_list)
+        assert result["reddit"]["status"] == "error"
+        assert "credentials" in result["reddit"]["error_detail"]
+
+    def test_timed_health_success(self):
+        async def _run():
+            async with timed_health("test_source") as ctx:
+                ctx.items_fetched = 10
+            return ctx.health
+        health = asyncio.run(_run())
+        assert health.source == "test_source"
+        assert health.status == "success"
+        assert health.items_fetched == 10
+        assert health.duration_ms >= 0
+
+    def test_timed_health_timeout(self):
+        async def _run():
+            async with timed_health("failing_source") as ctx:
+                raise TimeoutError("connection timed out")
+            return ctx.health
+        health = asyncio.run(_run())
+        assert health.status == "timeout"
+        assert health.items_fetched == 0
+
+    def test_timed_health_generic_exception(self):
+        async def _run():
+            async with timed_health("broken_source") as ctx:
+                raise RuntimeError("something broke")
+            return ctx.health
+        health = asyncio.run(_run())
+        assert health.status == "error"
+        assert "something broke" in health.error_detail
