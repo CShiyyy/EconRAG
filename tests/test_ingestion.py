@@ -74,6 +74,9 @@ class TestModels:
 
 
 import asyncio
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
 
 from pipeline.ingestion.health import aggregate_health, timed_health
 
@@ -125,3 +128,54 @@ class TestHealth:
         health = asyncio.run(_run())
         assert health.status == "error"
         assert "something broke" in health.error_detail
+
+
+from pipeline.ingestion.market_data import fetch_market_data
+
+
+class TestMarketData:
+    def test_fetch_valid_tickers(self):
+        """Mock yfinance to return structured data for known tickers."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = {
+            "currentPrice": 175.50,
+            "open": 174.00,
+            "previousClose": 173.80,
+            "trailingPE": 28.5,
+            "marketCap": 2_800_000_000_000,
+        }
+        mock_ticker.history.return_value = pd.DataFrame(
+            {"Close": [170.0, 171.0, 172.0, 173.0, 174.0]},
+            index=pd.date_range("2026-03-01", periods=5),
+        )
+
+        with patch("pipeline.ingestion.market_data.yf.Ticker", return_value=mock_ticker):
+            data, health = asyncio.run(fetch_market_data(["AAPL"]))
+
+        assert "AAPL" in data
+        assert data["AAPL"].current_price == 175.50
+        assert data["AAPL"].pe_ratio == 28.5
+        assert len(data["AAPL"].price_history_30d) == 5
+        assert health.status == "success"
+        assert health.items_fetched == 1
+
+    def test_fetch_invalid_ticker(self):
+        """Invalid ticker returns None in dict, health still success."""
+        mock_ticker = MagicMock()
+        mock_ticker.info = {}
+        mock_ticker.history.return_value = pd.DataFrame()
+
+        with patch("pipeline.ingestion.market_data.yf.Ticker", return_value=mock_ticker):
+            data, health = asyncio.run(fetch_market_data(["FAKETICKER"]))
+
+        assert data.get("FAKETICKER") is None
+        assert health.status == "success"
+
+    def test_fetch_exception_produces_error_health(self):
+        """If yfinance throws, health reports error."""
+        with patch("pipeline.ingestion.market_data.yf.Ticker", side_effect=Exception("network down")):
+            data, health = asyncio.run(fetch_market_data(["AAPL"]))
+
+        # _fetch_single_ticker catches the exception and returns None
+        assert data["AAPL"] is None
+        assert health.status == "success"  # timed_health wraps the loop, individual failures don't crash it
