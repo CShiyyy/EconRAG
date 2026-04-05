@@ -1,5 +1,6 @@
 """Tests for the Data Ingestion Layer (Phase 3)."""
 
+import json
 import time
 
 from pipeline.ingestion.models import (
@@ -585,3 +586,36 @@ class TestOrchestrator:
 
         assert isinstance(result, IngestionResult)
         assert len(result.news_hits) == 1
+
+
+class TestIntegration:
+    def test_import_from_package(self):
+        """Verify all public types are importable from the package."""
+        from pipeline.ingestion import (
+            IngestionResult,
+            MarketDataPoint,
+            NewsHit,
+            ParsedContent,
+            SocialHit,
+            SourceHealth,
+            run_ingestion,
+        )
+        assert callable(run_ingestion)
+
+    def test_health_aggregate_to_json(self):
+        """Health list converts to JSON-serializable dict for run_log.source_status."""
+        from pipeline.ingestion.health import aggregate_health
+
+        healths = [
+            SourceHealth("yfinance", "success", 30, 1200),
+            SourceHealth("yfinance_news", "success", 15, 800),
+            SourceHealth("newsdata", "rate_limited", 0, 100, "429 rate limit exceeded"),
+            SourceHealth("reddit", "error", 0, 0, "Reddit credentials not configured"),
+            SourceHealth("crawl4ai", "success", 12, 5000),
+        ]
+        blob = aggregate_health(healths)
+        json_str = json.dumps(blob)
+        parsed = json.loads(json_str)
+        assert parsed["yfinance"]["status"] == "success"
+        assert parsed["newsdata"]["error_detail"] == "429 rate limit exceeded"
+        assert parsed["crawl4ai"]["items_fetched"] == 12
