@@ -11,6 +11,19 @@ DB_PATH: Path = Path(os.getenv("ECONRAG_DB_PATH", str(DATA_DIR / "econrag.db")))
 
 VALID_UNIVERSES: tuple[str, ...] = ("sp500", "nasdaq100", "djia30")
 
+# --- Ingestion config ---
+NEWSDATA_API_KEY: str | None = os.getenv("NEWSDATA_API_KEY")
+REDDIT_CLIENT_ID: str | None = os.getenv("REDDIT_CLIENT_ID")
+REDDIT_CLIENT_SECRET: str | None = os.getenv("REDDIT_CLIENT_SECRET")
+REDDIT_USER_AGENT: str = os.getenv("REDDIT_USER_AGENT", "EconRAG/1.0")
+
+DEFAULT_SUBREDDITS: list[str] = ["wallstreetbets", "stocks", "investing"]
+MAX_NEWS_PER_TICKER: int = 20
+MAX_SOCIAL_PER_TICKER: int = 30
+NEWS_WINDOW_HOURS: int = 48
+CRAWL4AI_CONCURRENCY: int = 5
+CRAWL4AI_TIMEOUT_SECONDS: int = 30
+
 UNIVERSE_URLS: dict[str, str] = {
     "sp500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
     "nasdaq100": "https://en.wikipedia.org/wiki/Nasdaq-100",
