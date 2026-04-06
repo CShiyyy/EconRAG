@@ -96,3 +96,26 @@ def get_watchlist(conn: sqlite3.Connection) -> list[dict]:
     """Return all watchlist entries ordered by ticker."""
     rows = conn.execute("SELECT * FROM watchlist ORDER BY ticker").fetchall()
     return [dict(row) for row in rows]
+
+
+def get_active_standing_events(conn: sqlite3.Connection) -> list[dict]:
+    """Return all standing events with status='active', parsing affected_tickers JSON."""
+    rows = conn.execute(
+        "SELECT * FROM standing_events WHERE status = 'active'"
+    ).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["affected_tickers"] = json.loads(d["affected_tickers"])
+        result.append(d)
+    return result
+
+
+def store_agent_output(conn: sqlite3.Connection, run_id: int, agent: str, output: dict) -> int:
+    """Insert agent output JSON into agent_outputs table. Returns output_id."""
+    cursor = conn.execute(
+        "INSERT INTO agent_outputs (run_id, agent, output_blob) VALUES (?, ?, ?)",
+        (run_id, agent, json.dumps(output)),
+    )
+    conn.commit()
+    return cursor.lastrowid
