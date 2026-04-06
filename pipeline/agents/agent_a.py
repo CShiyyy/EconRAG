@@ -14,7 +14,7 @@ from typing import Any
 
 import ollama
 
-from pipeline.config import OLLAMA_MODEL
+from pipeline.config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from pipeline.db.helpers import get_active_standing_events, store_agent_output
 from pipeline.knowledge.graph_ops import query_graph
 
@@ -144,19 +144,33 @@ def _build_ticker_prompt(
 # Ollama call with retry
 # ---------------------------------------------------------------------------
 
-async def _call_ollama(messages: list[dict], retry: bool = True) -> dict | None:
-    """Call Ollama chat with JSON format, parse response, retry once on failure."""
+async def _call_ollama(
+    messages: list[dict],
+    retry: bool = True,
+    validator: Any | None = None,
+) -> dict | None:
+    """Call Ollama chat with JSON format, parse and optionally validate.
+
+    Args:
+        messages: Chat messages to send.
+        retry: Whether to attempt a corrective retry on failure.
+        validator: Optional callable(dict) -> bool. If provided and returns
+                   False, the response is treated as invalid (triggers retry).
+    """
     try:
-        response = ollama.chat(
+        client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+        response = await client.chat(
             model=OLLAMA_MODEL,
             messages=messages,
             format="json",
         )
         content = response["message"]["content"]
         data = json.loads(content)
+        if validator and not validator(data):
+            raise ValueError("Schema validation failed")
         return data
     except Exception:
-        logger.warning("Ollama call failed or returned invalid JSON")
+        logger.warning("Ollama call failed or returned invalid response")
         if not retry:
             return None
 
@@ -164,11 +178,14 @@ async def _call_ollama(messages: list[dict], retry: bool = True) -> dict | None:
     corrective = {
         "role": "user",
         "content": (
-            "Your previous response was not valid JSON. "
-            "Please respond with ONLY valid JSON matching the requested schema."
+            "Your previous response was not valid JSON or did not match the "
+            "requested schema. Please respond with ONLY valid JSON matching "
+            "the requested schema exactly."
         ),
     }
-    return await _call_ollama(messages + [corrective], retry=False)
+    return await _call_ollama(
+        messages + [corrective], retry=False, validator=validator
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +277,11 @@ async def run_agent_a(
                 + (f" {standing_summary}" if standing_summary else ""),
                 mode="local",
             )
-            data = await _call_ollama(_build_ticker_prompt(ticker, ctx, standing_summary))
-            if data and _validate_ticker_output(data):
+            data = await _call_ollama(
+                _build_ticker_prompt(ticker, ctx, standing_summary),
+                validator=_validate_ticker_output,
+            )
+            if data is not None:
                 per_ticker[ticker] = data
             else:
                 per_ticker[ticker] = _degraded_ticker_output(ticker)
@@ -296,9 +316,10 @@ async def run_agent_a(
         )
         standing_ctx = await _retrieve_context(rag, events_query, mode="global")
         standing_data = await _call_ollama(
-            _build_standing_prompt(standing_ctx, standing_events)
+            _build_standing_prompt(standing_ctx, standing_events),
+            validator=_validate_standing_output,
         )
-        if standing_data and _validate_standing_output(standing_data):
+        if standing_data is not None:
             standing_context_assessment = standing_data
         else:
             standing_context_assessment = {}
@@ -312,9 +333,10 @@ async def run_agent_a(
             query += f" {standing_summary}"
         ctx = await _retrieve_context(rag, query, mode="local")
         data = await _call_ollama(
-            _build_ticker_prompt(ticker, ctx, standing_summary)
+            _build_ticker_prompt(ticker, ctx, standing_summary),
+            validator=_validate_ticker_output,
         )
-        if data and _validate_ticker_output(data):
+        if data is not None:
             per_ticker[ticker] = data
         else:
             per_ticker[ticker] = _degraded_ticker_output(ticker)

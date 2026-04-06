@@ -42,7 +42,7 @@ def _valid_standing_response(canonical_ids):
 
 
 def _ollama_response(data: dict):
-    """Create a mock ollama.chat return value."""
+    """Create a mock ollama AsyncClient.chat return value."""
     return {"message": {"content": json.dumps(data)}}
 
 
@@ -76,6 +76,13 @@ def _seed_standing_event(conn, run_id: int, canonical_id: str = "FED_RATE_HIKE",
     return cur.lastrowid
 
 
+def _make_mock_client(side_effect):
+    """Create a mock AsyncClient whose chat() returns from side_effect list."""
+    mock_client = AsyncMock()
+    mock_client.chat = AsyncMock(side_effect=side_effect)
+    return mock_client
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -91,15 +98,15 @@ def mock_rag():
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_output_structure(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_output_structure(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """Full run output has macro_overview, standing_context_assessment, per_ticker."""
     mock_qg.return_value = "some context"
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_ticker_response()),
         _ollama_response(_valid_ticker_response("bearish", "moderate")),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -111,15 +118,15 @@ async def test_output_structure(mock_ollama, mock_qg, db_conn, mock_rag):
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_per_ticker_sentiment_values(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_per_ticker_sentiment_values(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """Sentiment and confidence values are within valid sets."""
     mock_qg.return_value = "context"
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_ticker_response("bearish", "weak")),
         _ollama_response(_valid_ticker_response("neutral", "moderate")),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -130,19 +137,19 @@ async def test_per_ticker_sentiment_values(mock_ollama, mock_qg, db_conn, mock_r
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_standing_context_included(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_standing_context_included(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """When standing events exist, standing_context_assessment is populated."""
     mock_qg.return_value = "context"
     run_id = _seed_run_log(db_conn)
     _seed_standing_event(db_conn, run_id)
 
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_standing_response(["FED_RATE_HIKE"])),
         _ollama_response(_valid_ticker_response()),
         _ollama_response(_valid_ticker_response()),
-    ]
+    ])
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
     assert result["standing_context_assessment"] != {}
@@ -151,15 +158,15 @@ async def test_standing_context_included(mock_ollama, mock_qg, db_conn, mock_rag
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_standing_context_empty(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_standing_context_empty(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """When no standing events, standing_context_assessment is empty dict."""
     mock_qg.return_value = "context"
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_ticker_response()),
         _ollama_response(_valid_ticker_response()),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -168,13 +175,13 @@ async def test_standing_context_empty(mock_ollama, mock_qg, db_conn, mock_rag):
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_requery_updates_only_flagged(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_requery_updates_only_flagged(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """Re-query mode only updates flagged tickers."""
     mock_qg.return_value = "context"
-    mock_ollama.chat.return_value = _ollama_response(
-        _valid_ticker_response("bearish", "strong")
-    )
+    MockAsyncClient.return_value = _make_mock_client([
+        _ollama_response(_valid_ticker_response("bearish", "strong")),
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(
         db_conn, mock_rag, TICKERS, run_id, flagged_tickers=["NVDA"]
@@ -188,21 +195,21 @@ async def test_requery_updates_only_flagged(mock_ollama, mock_qg, db_conn, mock_
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_corrective_retry(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_corrective_retry(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """First Ollama call returns invalid JSON, second succeeds."""
     mock_qg.return_value = "context"
     valid_ticker = _valid_ticker_response()
 
-    # Macro succeeds, first ticker call fails then succeeds, second ticker succeeds
-    mock_ollama.chat.side_effect = [
+    # Macro succeeds, first ticker call fails then succeeds (retry), second ticker succeeds
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         # First ticker: invalid then valid (retry)
         {"message": {"content": "not json at all"}},
         _ollama_response(valid_ticker),
         # Second ticker: succeeds
         _ollama_response(valid_ticker),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -213,18 +220,18 @@ async def test_corrective_retry(mock_ollama, mock_qg, db_conn, mock_rag):
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_degraded_output(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_degraded_output(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """When Ollama fails twice, degraded neutral/weak output is produced."""
     mock_qg.return_value = "context"
 
     # Macro succeeds, AAPL fails twice, NVDA succeeds
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         {"message": {"content": "bad"}},
         {"message": {"content": "still bad"}},
         _ollama_response(_valid_ticker_response()),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -237,15 +244,15 @@ async def test_degraded_output(mock_ollama, mock_qg, db_conn, mock_rag):
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_output_stored(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_output_stored(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """Verify agent output is stored in agent_outputs table."""
     mock_qg.return_value = "context"
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_ticker_response()),
         _ollama_response(_valid_ticker_response()),
-    ]
+    ])
     run_id = _seed_run_log(db_conn)
     await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
@@ -261,19 +268,19 @@ async def test_output_stored(mock_ollama, mock_qg, db_conn, mock_rag):
 
 @pytest.mark.asyncio
 @patch("pipeline.agents.agent_a.query_graph", new_callable=AsyncMock)
-@patch("pipeline.agents.agent_a.ollama")
-async def test_ticker_with_standing_event(mock_ollama, mock_qg, db_conn, mock_rag):
+@patch("pipeline.agents.agent_a.ollama.AsyncClient")
+async def test_ticker_with_standing_event(MockAsyncClient, mock_qg, db_conn, mock_rag):
     """Ticker in affected_tickers gets standing context appended to its query."""
     run_id = _seed_run_log(db_conn)
     _seed_standing_event(db_conn, run_id, affected_tickers=["NVDA"])
 
     mock_qg.return_value = "context"
-    mock_ollama.chat.side_effect = [
+    MockAsyncClient.return_value = _make_mock_client([
         _ollama_response(_valid_macro_response()),
         _ollama_response(_valid_standing_response(["FED_RATE_HIKE"])),
         _ollama_response(_valid_ticker_response()),  # AAPL
         _ollama_response(_valid_ticker_response()),  # NVDA
-    ]
+    ])
     result = await run_agent_a(db_conn, mock_rag, TICKERS, run_id)
 
     # Verify query_graph was called with standing context for NVDA
