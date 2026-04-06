@@ -54,3 +54,12 @@ DRIFT_BREACH_THRESHOLD: float = 0.05
 VOLATILITY_WARNING_MULTIPLIER: float = 1.5
 VOLATILITY_BREACH_MULTIPLIER: float = 2.0
 SECTOR_WARNING_BUFFER: float = 0.05
+
+# --- Cloud LLM config (Agent C) ---
+CLOUD_PROVIDER: str = os.getenv("CLOUD_PROVIDER", "gemini")
+GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+CLOUD_TEMPERATURE: float = float(os.getenv("CLOUD_TEMPERATURE", "0.3"))
+CLOUD_MAX_TOKENS: int = int(os.getenv("CLOUD_MAX_TOKENS", "8192"))
+CLOUD_RETRY_MAX_ATTEMPTS: int = 3
+CLOUD_RETRY_BASE_DELAY: float = 1.0

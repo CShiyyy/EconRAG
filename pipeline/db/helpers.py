@@ -119,3 +119,86 @@ def store_agent_output(conn: sqlite3.Connection, run_id: int, agent: str, output
     )
     conn.commit()
     return cursor.lastrowid
+
+
+def get_holdings(conn: sqlite3.Connection) -> list[dict]:
+    """Return all current holdings rows as dicts."""
+    rows = conn.execute("SELECT * FROM holdings").fetchall()
+    return [dict(row) for row in rows]
+
+
+def store_recommendations(
+    conn: sqlite3.Connection,
+    run_id: int,
+    per_ticker: dict[str, dict],
+    requery_triggered: bool = False,
+    requery_reason: str | None = None,
+) -> list[int]:
+    """Insert per-ticker recommendations from Agent C output.
+
+    Each ticker entry becomes a row in the recommendations table.
+    conviction_weight is null (computed later by Position Sizing Engine).
+    Returns list of recommendation_ids.
+    """
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).isoformat()
+    ids: list[int] = []
+    for ticker, entry in per_ticker.items():
+        cursor = conn.execute(
+            """INSERT INTO recommendations
+               (run_id, timestamp, ticker, action, conviction_scores,
+                conviction_weight, rationale, key_quant_metrics,
+                requery_triggered, requery_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                ts,
+                ticker,
+                entry["action"],
+                json.dumps(entry.get("conviction", {})),
+                None,
+                entry.get("rationale", ""),
+                json.dumps(entry.get("key_risk_factors", [])),
+                1 if requery_triggered else 0,
+                requery_reason,
+            ),
+        )
+        ids.append(cursor.lastrowid)
+    conn.commit()
+    return ids
+
+
+def get_previous_assessment(conn: sqlite3.Connection) -> dict | None:
+    """Get the most recent post-close assessment from the recommendations table.
+
+    Queries for the latest run_id where entries have action='assessment'.
+    Returns dict keyed by ticker with conviction scores and rationale,
+    or None if no assessment run has occurred yet.
+    """
+    row = conn.execute(
+        """SELECT run_id FROM recommendations
+           WHERE action = 'assessment'
+           ORDER BY recommendation_id DESC LIMIT 1"""
+    ).fetchone()
+    if row is None:
+        return None
+
+    latest_run_id = row["run_id"]
+    rows = conn.execute(
+        """SELECT ticker, conviction_scores, rationale, key_quant_metrics
+           FROM recommendations
+           WHERE run_id = ? AND action = 'assessment'""",
+        (latest_run_id,),
+    ).fetchall()
+
+    result: dict[str, dict] = {}
+    for r in rows:
+        result[r["ticker"]] = {
+            "conviction": json.loads(r["conviction_scores"]),
+            "rationale": r["rationale"],
+            "key_risk_factors": json.loads(r["key_quant_metrics"])
+            if r["key_quant_metrics"]
+            else [],
+        }
+    return result
