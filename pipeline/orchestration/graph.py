@@ -21,9 +21,9 @@ def _create_run_log(conn, run_type: str, first_run: bool) -> int:
     ts = datetime.now(timezone.utc).isoformat()
     cursor = conn.execute(
         """INSERT INTO run_log
-           (run_type, status, is_first_run, started_at)
-           VALUES (?, 'running', ?, ?)""",
-        (run_type, 1 if first_run else 0, ts),
+           (timestamp, run_type, is_first_run)
+           VALUES (?, ?, ?)""",
+        (ts, run_type, 1 if first_run else 0),
     )
     conn.commit()
     return cursor.lastrowid
@@ -69,7 +69,7 @@ async def run_pipeline(
     from pipeline.config import LIGHTRAG_STORAGE_DIR
     from pipeline.db.connection import get_connection
     from pipeline.db.helpers import get_previous_assessment, get_watchlist, is_first_run
-    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     if rag_storage_dir is None:
         rag_storage_dir = str(LIGHTRAG_STORAGE_DIR)
@@ -112,7 +112,8 @@ async def run_pipeline(
 
     graph = build_pipeline_graph()
 
-    with SqliteSaver.from_conn_string(db_path) as checkpointer:
+    checkpoint_path = db_path + ".checkpoints"
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as checkpointer:
         app = graph.compile(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": f"run-{run_id}"}}
         final_state = await app.ainvoke(initial_state, config=config)

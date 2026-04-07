@@ -117,9 +117,10 @@ async def log_node(state: PipelineState) -> dict:
                SET wall_clock_seconds = ?,
                    source_status = ?,
                    requery_triggered = ?,
-                   status = 'completed'
+                   requery_reason = ?
                WHERE run_id = ?""",
-            (round(wall_clock, 2), source_status, 1 if requery_triggered else 0, state["run_id"]),
+            (round(wall_clock, 2), source_status, 1 if requery_triggered else 0,
+             state.get("requery_reason"), state["run_id"]),
         )
         conn.commit()
         logger.info(
