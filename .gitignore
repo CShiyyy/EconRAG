@@ -25,3 +25,6 @@ env/
 *.swo
 .vscode/
 .idea/
+
+node_modules/
+frontend/dist/
