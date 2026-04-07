@@ -16,27 +16,98 @@ Autonomous Portfolio Monitoring Agent — a multi-agent system for US equities s
 - **Orchestration:** LangGraph (stateful multi-agent workflow with conditional edges)
 - **Knowledge Graph:** LightRAG (NanoVectorDB + NetworkX) with custom ontology-constrained extraction prompt
 - **Web Scraping:** Crawl4AI, yfinance, PRAW, NewsData.io/GNews
-- **Scheduling:** APScheduler with `exchange_calendars` for market day checks
+- **Scheduling:** APScheduler with `exchange_calendars` for market day checks (not yet implemented)
 - **Environment:** `python-dotenv` for API keys and config
 
-## Project Structure (Planned)
+## Project Structure
 
 ```
-backend/          # FastAPI app, routers, dependencies
+backend/                    # FastAPI app (Phase 8 — in progress, uncommitted)
+  main.py                   # FastAPI app setup with CORS
+  deps.py                   # Database session dependency
+  schemas.py                # Pydantic response models
+  routers/
+    init.py                 # POST /api/init, GET /api/init/status
+    portfolio.py            # GET /api/portfolio, snapshots, benchmark
+    recommendations.py      # GET /api/recommendations
+    runs.py                 # GET /api/runs, POST /api/runs/trigger
+    standing_events.py      # CRUD for standing events
+    constraints.py          # GET/PATCH /api/constraints
+    watchlist.py            # GET /api/watchlist, POST /api/watchlist/refresh
 pipeline/
-  db/             # SQLite schema, init, query helpers
-  scrapers/       # Watchlist scraper (Wikipedia)
-  ingestion/      # Market data, news, social, Crawl4AI parser, health tracking
-  knowledge/      # LightRAG config, extraction prompt, canonical registry, validator, pruner
-  agents/         # Agent A (local LLM), Agent B (quant script), Agent C (cloud API)
-  sizing/         # Conviction mapping, normalization, constraint enforcement, trade builder
-  orchestration/  # LangGraph graph, conditions, executor, scheduler, notifications
-frontend/
-  src/pages/      # Dashboard, recommendations, run inspector, P&L, standing events, constraints
-  src/components/ # Charts, tables, cards, conviction badges
-  src/api/        # API client
-tests/            # One test file per module
+  config.py                 # Shared config (paths, API keys, model settings)
+  db/
+    connection.py           # SQLite connection with WAL mode
+    schema.py               # All 12 table definitions
+    init.py                 # Initialization flow (account, watchlist, constraints, canonical entities)
+    helpers.py              # Query helpers (portfolio value, derived weights, first-run check)
+  scrapers/
+    watchlist.py            # Wikipedia scraper for index constituents (SP500/Nasdaq100/Dow30)
+  ingestion/
+    models.py               # Data models for ingestion layer
+    health.py               # Source health tracking
+    market_data.py          # yfinance scraper
+    news.py                 # NewsData.io / GNews scraper
+    social.py               # PRAW Reddit scraper
+    parser.py               # Crawl4AI URL-to-Markdown parser
+    orchestrator.py         # Runs all scrapers, volume caps, URL dedup
+  knowledge/
+    lightrag_config.py      # LightRAG setup with Ollama config
+    extraction_prompt.py    # Custom ontology-constrained extraction prompt
+    canonical.py            # Canonical entity registry resolution
+    validator.py            # Post-extraction validator with tier classification
+    graph_ops.py            # Graph insertion, query, correlation edge injection
+    extraction.py           # Extraction orchestrator with Ollama LLM calls
+    pruner.py               # Ephemeral TTL pruner with tier immunity
+  agents/
+    agent_a.py              # Local LLM context retriever (Gemma 4 E4B via Ollama)
+    agent_b.py              # Deterministic quant script (drift, volatility, health scores)
+    agent_c.py              # Cloud LLM synthesis (Gemini/Claude, assessment + decision modes)
+    cloud_client.py         # Abstracted API client for Gemini/Claude
+  sizing/
+    conviction_map.py       # 27-combination conviction weight lookup table
+    normalizer.py           # Normalization and constraint enforcement
+    trade_builder.py        # Trade list computation and cost basis
+    engine.py               # Orchestrates the full sizing pipeline
+  orchestration/
+    state.py                # PipelineState TypedDict
+    graph.py                # Parent LangGraph graph and pipeline entry point
+    data_graph.py           # Data pipeline LangGraph subgraph
+    reasoning_graph.py      # Agent reasoning LangGraph subgraph
+    execution_graph.py      # Execution LangGraph subgraph
+    conditions.py           # Re-query evaluator, run-type branching
+    executor.py             # Simulated trade execution and cost basis
+    snapshots.py            # Portfolio snapshot recording
+    standing.py             # Standing event action processing
+frontend/                   # React SPA (Phase 9 — in progress, uncommitted)
+  src/
+    App.jsx                 # Routing setup
+    main.jsx                # Entry point
+    pages/                  # InitPage, DashboardPage, RecommendationsPage, RunsPage,
+                            # RunDetailPage, PnlPage, StandingEventsPage, ConstraintsPage
+    components/             # charts/, conviction/, layout/, shared/
+    hooks/                  # Custom React hooks
+    api/                    # API client modules (one per domain)
+tests/                      # One test file per module
+docs/
+  specs/                    # Design specs used for each build phase
 ```
+
+## Build Phase Status
+
+| Phase | Name | Status | Branch |
+| :--- | :--- | :--- | :--- |
+| 1 | SQLite Schema & Initialization | Complete | phase3-data-ingestion |
+| 2 | Position Sizing Engine | Complete | phase3-data-ingestion |
+| 3 | Data Ingestion (yfinance + Crawl4AI) | Complete | phase3-data-ingestion |
+| 4 | LightRAG, Extraction & Canonical Registry | Complete | phase3-data-ingestion |
+| 5 | Agent A & Agent B | Complete | phase3-data-ingestion |
+| 6 | Agent C (Cloud LLM) | Complete | phase3-data-ingestion |
+| 7 | LangGraph Orchestration | Complete | phase3-data-ingestion |
+| 8 | FastAPI Backend | In progress (uncommitted) | phase3-data-ingestion |
+| 9 | React Frontend | In progress (uncommitted) | phase3-data-ingestion |
+
+Design specs for each phase are in `docs/specs/`.
 
 ## Architecture Reference
 

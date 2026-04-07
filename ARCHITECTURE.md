@@ -12,6 +12,9 @@
 - **Agent Orchestration:** LangGraph.
 - **Knowledge Graph:** LightRAG (NanoVectorDB + NetworkX).
 
+**Implementation Status (as of 2026-04-07):**
+Phases 1–7 of the build plan are complete and committed. Phase 8 (FastAPI backend) and Phase 9 (React frontend) are in progress with uncommitted code. Scheduler (`APScheduler`) and notification webhooks (`Discord/Telegram`) are not yet implemented. The LangGraph orchestration (§3, §6) is implemented as three subgraphs (`data_graph`, `reasoning_graph`, `execution_graph`) composed by a parent graph, rather than the single flat graph described in this document. A shared `pipeline/config.py` module centralizes paths, API keys, and model settings.
+
 **Ticker Universe:** The user selects a pre-defined index universe at initialization (S&P 500, Nasdaq 100, or Dow Jones 30). The system pulls the constituent ticker list from a public source (e.g., Wikipedia tables) and uses this as the tracked universe for ingestion, extraction, and Agent A queries. The universe can be changed via the UI; changes take effect on the next run.
 
 ---
@@ -229,6 +232,13 @@ Graph nodes and edges are managed according to three persistence tiers, replacin
 
 ## 3. Agent Orchestration (The Nervous System)
 *Framework: **LangGraph** (Stateful Multi-Agent Workflow with conditional edges).*
+
+**Implementation note:** The orchestration is split into three LangGraph subgraphs composed by a parent graph (`pipeline/orchestration/graph.py`):
+- **Data subgraph** (`data_graph.py`): snapshot → ingest → extract & resolve → embed & prune → standing maintenance
+- **Reasoning subgraph** (`reasoning_graph.py`): agent A → agent B → re-query check → agent C (assessment or decision)
+- **Execution subgraph** (`execution_graph.py`): standing actions → position sizing → trade execution → logging → notification
+
+The state object (`pipeline/orchestration/state.py`) is a `PipelineState` TypedDict shared across all subgraphs.
 
 The system maintains a **State Object** containing:
 
@@ -478,7 +488,7 @@ The two daily runs serve fundamentally different roles:
 - **Market Calendar:** Before executing, the scheduler checks whether today is a trading day (via `exchange_calendars` package). On weekends and holidays, the run is skipped entirely (or runs ingestion-only to keep the graph fresh, logging `run_type: non_trading_day`).
 
 ### Standard Run (Both Run Types)
-1. **Trigger:** APScheduler fires at configured time. Market calendar check — skip if not a trading day.
+1. **Trigger:** APScheduler fires at configured time. Market calendar check — skip if not a trading day. *(Scheduler and market calendar not yet implemented — runs are triggered manually or via API.)*
 2. **Snapshot:** Record current portfolio state to `snapshots` table. On post-close runs, revalue all positions at closing price.
 3. **Ingest:** Scrapers gather data from all sources for the watchlist universe; per-source health is logged. Crawl4AI cleans raw content.
 4. **Extract & Resolve:** LightRAG's custom extraction prompt (constrained to closed ontology) runs on cleaned chunks via Gemma 4 E4B. Raw entities are resolved through the Canonical Registry. Post-extraction validator enforces type compliance and attaches temporal metadata.
@@ -493,7 +503,7 @@ The two daily runs serve fundamentally different roles:
 11. **Assess (Agent C — Assessment Mode):** Cloud model receives Agent A's output + Agent B's output + source health + current holdings + constraints. Produces updated **conviction scores only** — no trade actions. Output schema uses `assessment` action type (see §4 Agent C schema).
 12. **Standing Event Actions:** Process any `standing_event_actions` from Agent C's output.
 13. **Log:** Agent C's assessment stored to `agent_outputs` and `recommendations` table (with `action: "assessment"` for each ticker). No Position Sizing Engine run. No trades.
-14. **Notify:** Discord/Telegram alert with conviction snapshot, any standing event changes, and notable shifts from previous assessment.
+14. **Notify:** Discord/Telegram alert with conviction snapshot, any standing event changes, and notable shifts from previous assessment. *(Notification webhooks not yet implemented.)*
 
 ### Pre-Open Run (Trade Producing — continues from step 10)
 11. **Synthesize (Agent C — Decision Mode):** Cloud model receives Agent A's output + Agent B's output (or `null` on first run) + **previous post-close assessment** as additional context + source health + current holdings + constraints. Produces per-ticker trade actions (Buy/Hold/Trim/Exit) with conviction sub-scores. May recommend standing event promotions or resolutions.
@@ -501,7 +511,7 @@ The two daily runs serve fundamentally different roles:
 13. **Log:** Agent C's raw output stored to `agent_outputs`. Parsed recommendations stored to `recommendations` table.
 14. **Size (Position Sizing Engine):** Conviction sub-scores → conviction weights → normalized target weights → constraint enforcement → trade list. Target allocation written to `computed_targets`.
 15. **Execute (Simulated):** Trades execute at official opening auction price. Logged to `trades` table with `gap_pct` and `slippage_applied`. `holdings` and `account.cash_balance` updated. Cost basis updated via weighted average method (see below).
-16. **Notify:** Discord/Telegram alert with recommendations, conviction levels, trades executed, any re-query details, and any standing event changes.
+16. **Notify:** Discord/Telegram alert with recommendations, conviction levels, trades executed, any re-query details, and any standing event changes. *(Notification webhooks not yet implemented.)*
 
 ### Cost Basis Accounting (Weighted Average Method)
 - **On Buy (new position):** `cost_basis_per_share = fill_price`.
@@ -525,6 +535,8 @@ The two daily runs serve fundamentally different roles:
 ## 7. Web Application Layer
 
 **Mode:** Simulation only. No live broker integration. UI is designed as if real to support future transition.
+
+**Implementation status:** FastAPI backend (`backend/`) and React frontend (`frontend/`) are in progress with uncommitted code. Backend routers cover init, portfolio, recommendations, runs, standing events, constraints, and watchlist. Frontend has pages for all core views (Dashboard, Recommendations, Runs, Run Detail, P&L, Standing Events, Constraints, Init) with shared components and API client modules.
 
 ### Initialization Flow
 - **First-time setup screen:** User selects a ticker universe (S&P 500 / Nasdaq 100 / Dow Jones 30), enters starting cash amount (required), and optionally adjusts constraint defaults (`cash_floor`, `max_single_position`, `max_sector_concentration`, `min_position_size`).
