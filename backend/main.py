@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.routers import (
+    admin,
     constraints,
     init,
     portfolio,
@@ -30,6 +31,7 @@ app.include_router(runs.router, prefix="/api")
 app.include_router(standing_events.router, prefix="/api")
 app.include_router(constraints.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Run log and pipeline trigger endpoints."""
 
 import json
+import logging
 import sqlite3
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -20,6 +21,8 @@ from backend.schemas import (
     TriggerStatusResponse,
 )
 from pipeline.config import DB_PATH, LIGHTRAG_STORAGE_DIR
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["runs"])
 
@@ -127,4 +130,5 @@ async def _execute_pipeline(trigger_id: int, run_type: str) -> None:
         run_id = result.get("run_id")
         complete_trigger(trigger_id, run_id)
     except Exception as e:
+        logger.exception("Pipeline run failed for trigger %s", trigger_id)
         fail_trigger(trigger_id, str(e))

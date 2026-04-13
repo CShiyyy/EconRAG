@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Protocol, runtime_checkable
 
+import httpx
 from google import genai
 from google.genai import types as genai_types
 from google.api_core import exceptions as google_exceptions
@@ -22,6 +23,8 @@ from pipeline.config import (
     CLOUD_TEMPERATURE,
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,9 +161,54 @@ class GeminiClient:
         )
 
 
+class OllamaClient:
+    """Ollama implementation of CloudLLMClient for local LLM inference."""
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model_name: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        self._base_url = base_url or OLLAMA_BASE_URL
+        self._model_name = model_name or OLLAMA_MODEL
+        self._temperature = temperature if temperature is not None else CLOUD_TEMPERATURE
+        self._max_tokens = max_tokens if max_tokens is not None else CLOUD_MAX_TOKENS
+
+    async def generate(
+        self,
+        messages: list[dict],
+        json_mode: bool = True,
+    ) -> str:
+        """Call Ollama chat API and return the raw response text."""
+        payload: dict = {
+            "model": self._model_name,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": self._temperature,
+                "num_predict": self._max_tokens,
+            },
+        }
+        if json_mode:
+            payload["format"] = "json"
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(
+                f"{self._base_url}/api/chat",
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"]
+
+
 def create_cloud_client() -> CloudLLMClient:
     """Factory: read CLOUD_PROVIDER from config and return the appropriate client."""
     from pipeline.config import CLOUD_PROVIDER
+
+    if CLOUD_PROVIDER == "ollama":
+        return OllamaClient()
 
     if CLOUD_PROVIDER == "gemini":
         return GeminiClient()

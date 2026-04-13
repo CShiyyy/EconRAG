@@ -8,8 +8,11 @@ Steps:
 5. Store computed targets and execute cost basis updates
 """
 
+import logging
 import sqlite3
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from pipeline.db.helpers import get_account, get_constraints
 from pipeline.sizing.conviction_map import get_conviction_weight
@@ -99,6 +102,10 @@ def run_sizing_engine(
     # Step 3: Enforce constraints
     actionable_tickers = list(target_weights.keys())
     sectors = _get_sector_map(conn, actionable_tickers)
+    unknown = [t for t in target_weights if t not in sectors]
+    if unknown:
+        logger.warning("Dropping tickers with no sector mapping (not in watchlist/holdings): %s", unknown)
+        target_weights = {t: w for t, w in target_weights.items() if t in sectors}
     target_weights = enforce_constraints(target_weights, sectors, constraints)
 
     # Compute total portfolio value for trade sizing
