@@ -12,6 +12,7 @@ from pipeline.agents.agent_c import (
     _validate_per_ticker,
     _validate_standing_actions,
     _degraded_output,
+    _sanitize_json_text,
     run_agent_c,
 )
 from pipeline.agents.cloud_client import CloudAuthError, CloudTimeoutError
@@ -617,3 +618,68 @@ class TestGetPreviousAssessment:
         assert "AAPL" in result
         assert "conviction" in result["AAPL"]
         assert result["AAPL"]["conviction"]["narrative_alignment"] == "strong"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — JSON sanitizer and empty per_ticker retry
+# ---------------------------------------------------------------------------
+
+class TestSanitizeJsonText:
+    def test_strips_markdown_fences(self):
+        raw = "```json\n{\"a\": 1}\n```"
+        result = json.loads(_sanitize_json_text(raw))
+        assert result == {"a": 1}
+
+    def test_strips_plain_fences(self):
+        raw = "```\n{\"a\": 1}\n```"
+        result = json.loads(_sanitize_json_text(raw))
+        assert result == {"a": 1}
+
+    def test_extracts_json_after_prose(self):
+        raw = 'Here is the JSON:\n{"a": 1}'
+        result = json.loads(_sanitize_json_text(raw))
+        assert result == {"a": 1}
+
+    def test_passthrough_clean_json(self):
+        raw = '{"a": 1}'
+        result = json.loads(_sanitize_json_text(raw))
+        assert result == {"a": 1}
+
+    def test_extracts_first_balanced_object_ignores_trailing_garbage(self):
+        # Verifies string-aware brace counting: the "}" inside the string
+        # value must not close the outer object prematurely.
+        raw = '{"per_ticker": {"NVDA": {"nested": "}"}}} trailing garbage'
+        result = json.loads(_sanitize_json_text(raw))
+        assert result["per_ticker"]["NVDA"]["nested"] == "}"
+
+
+class TestRetryOnEmptyPerTicker:
+    @pytest.mark.asyncio
+    async def test_retry_on_empty_per_ticker(self, db_conn):
+        """When the LLM returns valid JSON with per_ticker:{}, the retry
+        corrective prompt fires and the second attempt with real content succeeds."""
+        _seed_full_state(db_conn)
+        run_id = _seed_run_log(db_conn, "post_close")
+
+        valid_output = _valid_assessment_output()
+        client = _make_mock_client(side_effect=[
+            '{"per_ticker": {}}',        # attempt 1: valid JSON but fails validation
+            json.dumps(valid_output),    # attempt 2: succeeds
+        ])
+
+        result = await run_agent_c(
+            db_conn, _agent_a_output(), _agent_b_output(), _source_health(),
+            run_id, "post_close", is_first_run=False, client=client,
+        )
+
+        assert result["per_ticker"]["AAPL"]["action"] == "assessment"
+        assert client.generate.call_count == 2
+        # The corrective message appended on attempt 1 should reference the failure reason
+        second_call_messages = client.generate.call_args_list[1][0][0]
+        corrective = next(
+            (m for m in second_call_messages if m.get("role") == "user"
+             and "rejected" in m.get("content", "")),
+            None,
+        )
+        assert corrective is not None, "Expected a corrective user message on retry"
+        assert "per_ticker" in corrective["content"]

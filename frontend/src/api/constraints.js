@@ -1,7 +1,7 @@
 import api from './client';
 
-export async function getConstraints() {
-  const { data } = await api.get('/constraints');
+export async function getConstraints({ signal } = {}) {
+  const { data } = await api.get('/constraints', { signal });
   return data;
 }
 

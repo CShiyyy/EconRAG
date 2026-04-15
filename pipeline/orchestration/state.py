@@ -26,3 +26,4 @@ class PipelineState(TypedDict, total=False):
     db_path: str
     rag_storage_dir: str
     tickers: list[str]                   # Tracked tickers from watchlist
+    profile_seed_result: dict | None     # SeedResult from seed_profiles_node

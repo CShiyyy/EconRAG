@@ -21,21 +21,37 @@ export default function DashboardPage() {
   const [portfolio, setPortfolio] = useState(null);
   const [constraints, setConstraints] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [runType, setRunType] = useState('pre_open');
   const [triggerId, setTriggerId] = useState(null);
   const [triggerBusy, setTriggerBusy] = useState(false);
 
-  const fetchData = () => {
-    Promise.all([getPortfolio(), getConstraints()])
-      .then(([p, c]) => {
-        setPortfolio(p);
-        setConstraints(c.constraints);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
+  const fetchData = useCallback(({ signal } = {}) => {
+    setError(null);
+    return Promise.allSettled([
+      getPortfolio({ signal }),
+      getConstraints({ signal }),
+    ]).then(([pRes, cRes]) => {
+      if (pRes.status === 'fulfilled') {
+        setPortfolio(pRes.value);
+      } else if (pRes.reason?.name !== 'CanceledError' && pRes.reason?.name !== 'AbortError') {
+        console.error('getPortfolio failed', pRes.reason);
+        setError('Failed to load portfolio data');
+      }
+      if (cRes.status === 'fulfilled') {
+        setConstraints(cRes.value.constraints);
+      } else if (cRes.reason?.name !== 'CanceledError' && cRes.reason?.name !== 'AbortError') {
+        console.error('getConstraints failed', cRes.reason);
+      }
+      setLoading(false);
+    });
+  }, []);
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchData({ signal: controller.signal });
+    return () => controller.abort();
+  }, [fetchData]);
 
   const pollFn = useCallback(
     () => (triggerId != null ? getTriggerStatus(triggerId) : Promise.resolve(null)),
@@ -48,7 +64,7 @@ export default function DashboardPage() {
       setTriggerBusy(false);
       if (triggerData.status === 'completed') fetchData();
     }
-  }, [triggerData]);
+  }, [triggerData, fetchData]);
 
   const handleTrigger = async () => {
     setTriggerBusy(true);
@@ -67,6 +83,11 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6">
+      {error && (
+        <div className="rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">Dashboard</h1>
         <div className="flex items-center gap-2">

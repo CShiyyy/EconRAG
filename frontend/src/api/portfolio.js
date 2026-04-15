@@ -1,7 +1,7 @@
 import api from './client';
 
-export async function getPortfolio() {
-  const { data } = await api.get('/portfolio');
+export async function getPortfolio({ signal } = {}) {
+  const { data } = await api.get('/portfolio', { signal });
   return data;
 }
 

@@ -145,17 +145,32 @@ TABLES_SQL: list[str] = [
         created_from_run_id INTEGER REFERENCES run_log(run_id)
     )
     """,
+    # 13. kg_seed_log — tracks which LightRAG profiles have been seeded
+    """
+    CREATE TABLE IF NOT EXISTS kg_seed_log (
+        seed_type  TEXT NOT NULL,
+        seed_key   TEXT NOT NULL,
+        seeded_at  TEXT NOT NULL,
+        run_id     INTEGER REFERENCES run_log(run_id),
+        source_id  TEXT NOT NULL,
+        PRIMARY KEY (seed_type, seed_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_kg_seed_log_type ON kg_seed_log(seed_type)
+    """,
 ]
 
 EXPECTED_TABLES: set[str] = {
     "run_log", "account", "watchlist", "constraints", "holdings",
     "canonical_entities", "computed_targets", "snapshots",
     "recommendations", "trades", "agent_outputs", "standing_events",
+    "kg_seed_log",
 }
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
-    """Create all 12 tables. Idempotent (uses IF NOT EXISTS)."""
+    """Create all tables. Idempotent (uses IF NOT EXISTS)."""
     for ddl in TABLES_SQL:
         conn.execute(ddl)
     conn.commit()

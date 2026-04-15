@@ -46,12 +46,16 @@ class CloudLLMClient(Protocol):
         self,
         messages: list[dict],
         json_mode: bool = True,
+        response_schema: dict | None = None,
     ) -> str:
         """Send messages to the cloud LLM and return raw response text.
 
         Args:
             messages: List of {"role": "system"|"user", "content": str} dicts.
             json_mode: If True, request JSON-formatted output.
+            response_schema: Optional JSON Schema dict for schema-constrained
+                generation. When provided, the provider will enforce the exact
+                output structure rather than relying solely on prompt instructions.
 
         Returns:
             Raw response text from the model.
@@ -87,6 +91,7 @@ class GeminiClient:
         self,
         messages: list[dict],
         json_mode: bool = True,
+        response_schema: dict | None = None,
     ) -> str:
         """Call Gemini with retry logic for rate limits and timeouts."""
         # Separate system instruction from user content
@@ -110,6 +115,8 @@ class GeminiClient:
         )
         if json_mode:
             config.response_mime_type = "application/json"
+        if response_schema is not None:
+            config.response_schema = response_schema
 
         last_error: Exception | None = None
         for attempt in range(CLOUD_RETRY_MAX_ATTEMPTS):
@@ -180,6 +187,7 @@ class OllamaClient:
         self,
         messages: list[dict],
         json_mode: bool = True,
+        response_schema: dict | None = None,
     ) -> str:
         """Call Ollama chat API and return the raw response text."""
         payload: dict = {
@@ -191,7 +199,10 @@ class OllamaClient:
                 "num_predict": self._max_tokens,
             },
         }
-        if json_mode:
+        if response_schema is not None:
+            # Ollama structured outputs: pass schema dict directly as format
+            payload["format"] = response_schema
+        elif json_mode:
             payload["format"] = "json"
 
         async with httpx.AsyncClient(timeout=300) as client:

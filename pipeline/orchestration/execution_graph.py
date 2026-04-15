@@ -97,6 +97,23 @@ async def execute_trades_node(state: PipelineState) -> dict:
     return {}
 
 
+async def snapshot_node(state: PipelineState) -> dict:
+    """Record the post-execution portfolio snapshot using live ingestion prices."""
+    from pipeline.db.connection import get_connection
+    from pipeline.orchestration.snapshots import record_snapshot
+
+    ingestion = state.get("ingestion_result") or {}
+    market_data = ingestion.get("market_data") or None
+
+    conn = get_connection(state["db_path"])
+    try:
+        record_snapshot(conn, state["run_id"], market_data, state["run_type"])
+        logger.info("Snapshot recorded for run %s", state["run_id"])
+    finally:
+        conn.close()
+    return {}
+
+
 async def log_node(state: PipelineState) -> dict:
     """Update run log with final timing and status."""
     from pipeline.db.connection import get_connection
@@ -138,7 +155,7 @@ async def log_node(state: PipelineState) -> dict:
 def _route_after_standing(state: PipelineState) -> str:
     """Route after standing actions: skip sizing on post-close runs."""
     if state.get("run_type") == "post_close":
-        return "log"
+        return "snapshot"
     return "position_sizing"
 
 
@@ -149,14 +166,16 @@ def build_execution_graph() -> StateGraph:
     graph.add_node("standing_actions", standing_actions_node)
     graph.add_node("position_sizing", position_sizing_node)
     graph.add_node("execute_trades", execute_trades_node)
+    graph.add_node("snapshot", snapshot_node)
     graph.add_node("log", log_node)
 
     graph.add_edge(START, "standing_actions")
     graph.add_conditional_edges(
-        "standing_actions", _route_after_standing, ["position_sizing", "log"]
+        "standing_actions", _route_after_standing, ["position_sizing", "snapshot"]
     )
     graph.add_edge("position_sizing", "execute_trades")
-    graph.add_edge("execute_trades", "log")
+    graph.add_edge("execute_trades", "snapshot")
+    graph.add_edge("snapshot", "log")
     graph.add_edge("log", END)
 
     return graph

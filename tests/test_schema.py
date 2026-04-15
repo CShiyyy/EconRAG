@@ -5,7 +5,7 @@ import pytest
 from pipeline.db.schema import EXPECTED_TABLES, create_tables
 
 
-def test_create_tables_creates_all_12(db_conn):
+def test_create_tables_creates_all(db_conn):
     rows = db_conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
@@ -19,7 +19,7 @@ def test_create_tables_idempotent(db_conn):
     rows = db_conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
-    assert len(rows) == 12
+    assert len(rows) == len(EXPECTED_TABLES)
 
 
 def test_wal_mode_active(db_conn):

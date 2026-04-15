@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from typing import Any
 
@@ -587,52 +588,151 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
 # Cloud call with retry
 # ---------------------------------------------------------------------------
 
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def _sanitize_json_text(raw: str) -> str:
+    """Strip markdown fences and extract the first balanced JSON object.
+
+    Handles the common LLM habit of wrapping JSON in ```json ... ``` or
+    prefixing with prose like "Here is the JSON:".
+    """
+    if not raw:
+        return raw
+    text = _CODE_FENCE_RE.sub("", raw).strip()
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return text  # unbalanced — let json.loads raise a clear error
+
+
+def _build_response_schema(known_tickers: set[str], mode: str) -> dict:
+    """Build a JSON Schema that constrains the LLM to produce all required tickers.
+
+    Using schema-constrained generation (Gemini response_schema / Ollama format)
+    prevents the model from returning an empty or missing per_ticker dict.
+    """
+    if mode == "assessment":
+        valid_actions = ["assessment"]
+        conviction_enum = ["strong", "moderate", "weak"]
+    elif mode == "first_run":
+        valid_actions = ["Buy", "Hold"]
+        conviction_enum = ["strong", "moderate", "weak", "n/a"]
+    else:  # decision
+        valid_actions = ["Buy", "Hold", "Trim", "Exit"]
+        conviction_enum = ["strong", "moderate", "weak"]
+
+    entry_schema: dict = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": valid_actions},
+            "conviction": {
+                "type": "object",
+                "properties": {
+                    "narrative_alignment": {"type": "string", "enum": conviction_enum},
+                    "quant_support": {"type": "string", "enum": conviction_enum},
+                    "signal_agreement": {"type": "string", "enum": conviction_enum},
+                },
+                "required": ["narrative_alignment", "quant_support", "signal_agreement"],
+            },
+            "rationale": {"type": "string"},
+            "key_risk_factors": {"type": "array", "items": {"type": "string"}},
+            "notable_change": {"type": "string"},
+        },
+        "required": ["action", "conviction", "rationale", "key_risk_factors"],
+    }
+
+    sorted_tickers = sorted(known_tickers)
+    return {
+        "type": "object",
+        "properties": {
+            "per_ticker": {
+                "type": "object",
+                "properties": {t: entry_schema for t in sorted_tickers},
+                "required": sorted_tickers,
+            },
+        },
+        "required": ["per_ticker"],
+    }
+
+
 async def _call_cloud(
     client: CloudLLMClient,
     messages: list[dict],
     mode: str,
     known_tickers: set[str] | None = None,
+    schema: dict | None = None,
 ) -> dict | None:
     """Call cloud LLM, parse JSON, validate. Retry once on failure.
 
     Returns validated dict or None if both attempts fail.
     """
-    validation_error: str = ""
+    last_failure_detail: str = ""
+    last_raw_preview: str = ""
     for attempt in range(2):
         try:
-            raw = await client.generate(messages, json_mode=True)
-            data = json.loads(raw)
+            raw = await client.generate(messages, json_mode=True, response_schema=schema)
+            last_raw_preview = (raw or "")[:500]
+            data = json.loads(_sanitize_json_text(raw))
             data = _normalize_response(data, known_tickers)
-            valid, validation_error = _validate_output(data, mode)
+            valid, err = _validate_output(data, mode)
             if valid:
                 return data
+            last_failure_detail = f"Schema validation failed: {err}"
             logger.warning(
                 "Cloud response failed validation (attempt %d): %s",
                 attempt + 1,
-                validation_error,
+                err,
             )
         except CloudAuthError:
             raise
-        except (json.JSONDecodeError, CloudTimeoutError):
-            logger.warning("Cloud call failed (attempt %d)", attempt + 1)
-        except Exception:
+        except json.JSONDecodeError as exc:
+            last_failure_detail = (
+                f"Response was not valid JSON: {exc.msg} at line {exc.lineno} col {exc.colno}"
+            )
+            logger.warning("Cloud call returned invalid JSON (attempt %d): %s", attempt + 1, exc)
+        except CloudTimeoutError as exc:
+            last_failure_detail = f"Timeout: {exc}"
+            logger.warning("Cloud call timed out (attempt %d)", attempt + 1)
+        except Exception as exc:
+            last_failure_detail = f"Unexpected error: {type(exc).__name__}: {exc}"
             logger.exception("Unexpected error calling cloud LLM (attempt %d)", attempt + 1)
 
         if attempt == 0:
-            # Add corrective prompt with specific error and schema reminder for retry
-            error_detail = f" Specific error: {validation_error}" if validation_error else ""
-            # Re-state the system prompt schema so the LLM has it fresh in context
-            system_content = next(
-                (m["content"] for m in messages if m.get("role") == "system"), ""
-            )
-            schema_reminder = f"\n\nReminder — required schema:\n{system_content}" if system_content else ""
+            ticker_list = sorted(known_tickers) if known_tickers else []
             messages = messages + [
                 {
                     "role": "user",
                     "content": (
-                        "Your previous response was not valid JSON or did not match "
-                        f"the requested schema.{error_detail} Please respond with ONLY valid JSON "
-                        f"matching the schema exactly.{schema_reminder}"
+                        f"Your previous response was rejected.\n"
+                        f"Reason: {last_failure_detail}\n"
+                        f"Your previous response started with: {last_raw_preview!r}\n\n"
+                        "You MUST respond with ONLY a single JSON object — no markdown, "
+                        "no code fences, no prose. The response MUST include a non-empty "
+                        f"`per_ticker` object containing an entry for every ticker in: "
+                        f"{ticker_list}. Start your response with '{{'."
                     ),
                 },
             ]
@@ -712,8 +812,10 @@ async def run_agent_c(
             previous_assessment,
         )
 
-    # Call cloud LLM
-    result = await _call_cloud(client, messages, mode, known_tickers=set(tickers))
+    # Call cloud LLM with schema-constrained generation
+    known_tickers = set(tickers)
+    schema = _build_response_schema(known_tickers, mode) if known_tickers else None
+    result = await _call_cloud(client, messages, mode, known_tickers=known_tickers, schema=schema)
 
     if result is None:
         logger.error("Cloud LLM failed after retries — producing degraded output")

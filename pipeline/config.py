@@ -59,7 +59,12 @@ SECTOR_WARNING_BUFFER: float = 0.05
 CLOUD_PROVIDER: str = os.getenv("CLOUD_PROVIDER", "ollama")
 GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
-CLOUD_TEMPERATURE: float = float(os.getenv("CLOUD_TEMPERATURE", "0.3"))
+CLOUD_TEMPERATURE: float = float(os.getenv("CLOUD_TEMPERATURE", "0.1"))
 CLOUD_MAX_TOKENS: int = int(os.getenv("CLOUD_MAX_TOKENS", "16384"))
 CLOUD_RETRY_MAX_ATTEMPTS: int = 3
 CLOUD_RETRY_BASE_DELAY: float = 1.0
+
+# --- Profile seeding (LightRAG baseline at init) ---
+PROFILE_SEED_ENABLED: bool = os.getenv("PROFILE_SEED_ENABLED", "true").lower() != "false"
+PROFILE_SEED_TTL_HOURS: int = int(os.getenv("PROFILE_SEED_TTL_HOURS", "720"))  # 30 days for Tier 2 macro edges
+PROFILE_SEED_CONCURRENCY: int = int(os.getenv("PROFILE_SEED_CONCURRENCY", "3"))

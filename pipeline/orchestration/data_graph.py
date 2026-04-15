@@ -1,4 +1,4 @@
-"""Data Pipeline Subgraph — snapshot -> ingest -> extract_and_resolve -> embed_and_prune -> standing_maintenance."""
+"""Data Pipeline Subgraph — seed_profiles -> ingest -> extract_and_resolve -> embed_and_prune -> standing_maintenance."""
 
 from __future__ import annotations
 
@@ -12,21 +12,38 @@ from pipeline.orchestration.state import PipelineState
 logger = logging.getLogger(__name__)
 
 
-async def snapshot_node(state: PipelineState) -> dict:
-    """Record portfolio snapshot for this run."""
+async def seed_profiles_node(state: PipelineState) -> dict:
+    """Seed LightRAG with ticker and macro profiles before the first ingest.
+
+    Idempotent: profiles already in kg_seed_log are skipped in O(1) SQL.
+    Runs on every pipeline call so new tickers added via watchlist refresh
+    are picked up automatically on the next run.
+    """
+    from pipeline.agents.cloud_client import create_cloud_client
+    from pipeline.config import PROFILE_SEED_ENABLED
     from pipeline.db.connection import get_connection
-    from pipeline.orchestration.snapshots import record_snapshot
+    from pipeline.knowledge.lightrag_config import get_rag_instance
+    from pipeline.knowledge.profile_seeder import seed_missing_profiles
+
+    if not PROFILE_SEED_ENABLED:
+        return {}
 
     conn = get_connection(state["db_path"])
     try:
-        market_data = None
-        if state.get("ingestion_result") and state["ingestion_result"].get("market_data"):
-            market_data = state["ingestion_result"]["market_data"]
-        record_snapshot(conn, state["run_id"], market_data, state["run_type"])
-        logger.info("Snapshot recorded for run %s", state["run_id"])
+        rag = await get_rag_instance(state.get("rag_storage_dir"))
+        client = create_cloud_client()
+        result = await seed_missing_profiles(conn, rag, client, state["run_id"])
+        return {
+            "profile_seed_result": {
+                "tickers_seeded": result.tickers_seeded,
+                "macro_seeded": result.macro_seeded,
+                "skipped_existing": result.skipped_existing,
+                "tickers_failed": result.tickers_failed,
+                "macro_error": result.macro_error,
+            }
+        }
     finally:
         conn.close()
-    return {}
 
 
 async def ingest_node(state: PipelineState) -> dict:
@@ -122,17 +139,21 @@ async def standing_maintenance_node(state: PipelineState) -> dict:
 
 
 def build_data_graph() -> StateGraph:
-    """Build the data pipeline subgraph (uncompiled)."""
+    """Build the data pipeline subgraph (uncompiled).
+
+    Edge order: seed_profiles -> ingest -> extract_and_resolve
+                -> embed_and_prune -> standing_maintenance
+    """
     graph = StateGraph(PipelineState)
 
-    graph.add_node("snapshot", snapshot_node)
+    graph.add_node("seed_profiles", seed_profiles_node)
     graph.add_node("ingest", ingest_node)
     graph.add_node("extract_and_resolve", extract_and_resolve_node)
     graph.add_node("embed_and_prune", embed_and_prune_node)
     graph.add_node("standing_maintenance", standing_maintenance_node)
 
-    graph.add_edge(START, "snapshot")
-    graph.add_edge("snapshot", "ingest")
+    graph.add_edge(START, "seed_profiles")
+    graph.add_edge("seed_profiles", "ingest")
     graph.add_edge("ingest", "extract_and_resolve")
     graph.add_edge("extract_and_resolve", "embed_and_prune")
     graph.add_edge("embed_and_prune", "standing_maintenance")

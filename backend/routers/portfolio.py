@@ -31,12 +31,10 @@ def _snapshot_price_fn(conn: sqlite3.Connection):
     if row is None:
         return None
     per_ticker = json.loads(row["per_ticker_json"])
-    prices = {}
+    prices: dict[str, float] = {}
     for ticker, data in per_ticker.items():
-        if isinstance(data, dict) and "current_price" in data:
-            prices[ticker] = data["current_price"]
-        elif isinstance(data, (int, float)):
-            prices[ticker] = data
+        if isinstance(data, dict) and "price" in data:
+            prices[ticker] = data["price"]
     if not prices:
         return None
     return lambda t: prices.get(t, 0.0)
