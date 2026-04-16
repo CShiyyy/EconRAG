@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_ACTIONS = {"Hold", "Buy", "Trim", "Exit", "assessment"}
-VALID_CONVICTION = {"strong", "moderate", "weak"}
-VALID_CONVICTION_NA = {"strong", "moderate", "weak", "n/a"}
+VALID_CONVICTION = {"very_strong", "strong", "moderate", "weak", "very_weak"}
+VALID_CONVICTION_NA = {"very_strong", "strong", "moderate", "weak", "very_weak", "n/a"}
 VALID_CATEGORIES = {
     "geopolitical", "monetary_policy", "regulatory",
     "trade_policy", "sector_crisis", "other",
@@ -161,11 +161,14 @@ Produce ONLY valid JSON matching this exact schema:
     "TICKER": {
       "action": "assessment",
       "conviction": {
-        "narrative_alignment": "strong | moderate | weak",
-        "quant_support": "strong | moderate | weak",
-        "signal_agreement": "strong | moderate | weak"
+        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
+        "narrative_confidence": 7.5,
+        "quant_support": "very_strong | strong | moderate | weak | very_weak",
+        "quant_confidence": 6.0,
+        "signal_agreement": "very_strong | strong | moderate | weak | very_weak",
+        "signal_confidence": 5.0
       },
-      "rationale": "End-of-day assessment reasoning",
+      "rationale": "3-5 sentences: summarise the day's narrative evidence, reference the key quant metrics (drift, volatility, health), and state your risk/reward view.",
       "key_risk_factors": ["risk1", "risk2"],
       "notable_change": "Description of significant changes or null"
     }
@@ -180,10 +183,45 @@ Rules:
 - Every held ticker MUST have an entry with action "assessment".
 - You MUST produce a per_ticker entry for Every ticker held in CURRENT HOLDINGS. Do not omit any held ticker.
 - Do NOT include tickers not listed in CURRENT HOLDINGS. Use ONLY the exact ticker symbols provided.
-- conviction sub-scores must be one of: "strong", "moderate", "weak".
+- conviction sub-scores must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range — not every ticker is "moderate".
+- confidence scores are floats 0.0–10.0. Use 5.0 when uncertain, higher when evidence is clear, lower when conflicting.
 - Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
 - standing_event_actions is optional — omit or leave arrays empty if no actions warranted.
-- Respond with ONLY valid JSON, no additional text."""
+- Respond with ONLY valid JSON, no additional text.
+
+EXAMPLE OUTPUT (2 tickers shown — follow this style for all tickers):
+{
+  "per_ticker": {
+    "MSFT": {
+      "action": "assessment",
+      "conviction": {
+        "narrative_alignment": "strong",
+        "narrative_confidence": 7.5,
+        "quant_support": "strong",
+        "quant_confidence": 8.0,
+        "signal_agreement": "moderate",
+        "signal_confidence": 5.5
+      },
+      "rationale": "MSFT closed up 1.8% on strong Azure revenue commentary from analyst day. Drift is +0.3% within tolerance and 30-day volatility is low at 18%. Quant health is normal with no flags. Sentiment from financial media is broadly positive, though a few outlets note near-term valuation stretch. Risk/reward favours holding into next earnings.",
+      "key_risk_factors": ["valuation premium vs peers", "enterprise spending slowdown risk"],
+      "notable_change": "Analyst day commentary drove above-average volume"
+    },
+    "BA": {
+      "action": "assessment",
+      "conviction": {
+        "narrative_alignment": "weak",
+        "narrative_confidence": 3.0,
+        "quant_support": "weak",
+        "quant_confidence": 2.5,
+        "signal_agreement": "very_weak",
+        "signal_confidence": 2.0
+      },
+      "rationale": "BA fell 3.1% on renewed reports of 737 MAX production delays. Drift has breached the warning threshold at -1.2% and 30-day volatility is elevated at 34%. Sentiment across news and social is bearish with no bullish counterbalance. The position is approaching trim territory pending tomorrow's pre-open read.",
+      "key_risk_factors": ["737 MAX production halt risk", "FAA regulatory action", "balance sheet stress from cash burn"],
+      "notable_change": "Drift breach flag triggered; volatility above warning threshold"
+    }
+  }
+}"""
 
 
 _DECISION_SYSTEM = """\
@@ -197,11 +235,14 @@ Produce ONLY valid JSON matching this exact schema:
     "TICKER": {
       "action": "Buy | Hold | Trim | Exit",
       "conviction": {
-        "narrative_alignment": "strong | moderate | weak",
-        "quant_support": "strong | moderate | weak",
-        "signal_agreement": "strong | moderate | weak"
+        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
+        "narrative_confidence": 7.5,
+        "quant_support": "very_strong | strong | moderate | weak | very_weak",
+        "quant_confidence": 6.0,
+        "signal_agreement": "very_strong | strong | moderate | weak | very_weak",
+        "signal_confidence": 5.0
       },
-      "rationale": "Narrative and quant reasoning for this decision",
+      "rationale": "3-5 sentences: state your action reasoning, cite specific narrative evidence from Agent A, reference the quant metrics (drift, volatility, health) from Agent B, and assess the key risk.",
       "key_risk_factors": ["risk1", "risk2"]
     }
   },
@@ -229,9 +270,42 @@ Rules:
 - Do NOT include tickers not listed in CURRENT HOLDINGS. Use ONLY the exact ticker symbols provided.
 - Use action="Buy" for tickers with positive evidence, action="Hold" for tickers with insufficient or degraded evidence, action="Trim" for tickers with negative evidence and action="Exit" for tickers with highly negative evidence.
 - Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
-- narrative_alignment must be one of: "strong", "moderate", "weak".
+- conviction sub-scores must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range — not every ticker is "moderate".
+- confidence scores are floats 0.0–10.0. Use 5.0 when uncertain, higher when evidence is clear, lower when conflicting.
 - standing_event_actions is optional — omit or leave arrays empty if no actions warranted.
-- Respond with ONLY valid JSON, no additional text."""
+- Respond with ONLY valid JSON, no additional text.
+
+EXAMPLE OUTPUT (2 tickers shown — follow this style for all tickers):
+{
+  "per_ticker": {
+    "NVDA": {
+      "action": "Buy",
+      "conviction": {
+        "narrative_alignment": "very_strong",
+        "narrative_confidence": 9.0,
+        "quant_support": "strong",
+        "quant_confidence": 7.5,
+        "signal_agreement": "strong",
+        "signal_confidence": 7.0
+      },
+      "rationale": "NVDA has strong bullish sentiment across news and social following data centre order announcements overnight. Quant metrics are healthy: drift is +0.1%, 30-day volatility is 28% within tolerance, and health score is normal. Signal agreement between narrative and quant is strong. Adding to position is warranted given the clear catalyst and manageable risk profile. Key risk is that AI capex expectations are already partly priced in.",
+      "key_risk_factors": ["AI capex expectations already priced in", "export restriction escalation risk"]
+    },
+    "WBA": {
+      "action": "Trim",
+      "conviction": {
+        "narrative_alignment": "very_weak",
+        "narrative_confidence": 2.0,
+        "quant_support": "weak",
+        "quant_confidence": 3.0,
+        "signal_agreement": "weak",
+        "signal_confidence": 3.5
+      },
+      "rationale": "WBA sentiment is broadly negative following store closure announcements and a dividend cut rumour in overnight news. Quant shows a drift breach of -1.8% and elevated volatility of 41%. Both narrative and quant signals agree on deterioration. Trimming to reduce exposure while preserving optionality on any turnaround. Main risk is further downside if the dividend cut is confirmed.",
+      "key_risk_factors": ["dividend cut confirmation risk", "store closure cash costs", "consumer spending weakness"]
+    }
+  }
+}"""
 
 
 _FIRST_RUN_SYSTEM = """\
@@ -245,11 +319,14 @@ Produce ONLY valid JSON matching this exact schema:
     "TICKER": {
       "action": "Buy | Hold",
       "conviction": {
-        "narrative_alignment": "strong | moderate | weak",
+        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
+        "narrative_confidence": 7.5,
         "quant_support": "n/a",
-        "signal_agreement": "n/a"
+        "quant_confidence": 0.0,
+        "signal_agreement": "n/a",
+        "signal_confidence": 0.0
       },
-      "rationale": "Why this ticker is compelling for the initial portfolio",
+      "rationale": "3-5 sentences: cite specific narrative evidence for this ticker, compare its outlook relative to peers, and state the primary risk to the thesis.",
       "key_risk_factors": ["risk1", "risk2"]
     }
   }
@@ -260,11 +337,56 @@ Rules:
 - Do NOT include any tickers that are not in the WATCHLIST. Use ONLY the exact ticker symbols provided.
 - Use action="Buy" for tickers with positive evidence, action="Hold" for tickers with insufficient or degraded evidence.
 - Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
-- narrative_alignment must be one of: "strong", "moderate", "weak".
+- narrative_alignment must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range to differentiate tickers — not all tickers are equally attractive.
+- narrative_confidence is a float 0.0–10.0 reflecting how certain you are in the narrative score. Use the full range.
+- quant_support and signal_agreement MUST be "n/a" with confidence 0.0 (no quantitative data on first run).
 - No standing_event_actions on first run.
-- Respond with ONLY valid JSON, no additional text."""
+- Respond with ONLY valid JSON, no additional text.
 
-# quant_support and signal_agreement MUST be "n/a" (no quantitative data available).
+EXAMPLE OUTPUT (3 tickers shown — follow this style for all watchlist tickers):
+{
+  "per_ticker": {
+    "AAPL": {
+      "action": "Buy",
+      "conviction": {
+        "narrative_alignment": "strong",
+        "narrative_confidence": 7.5,
+        "quant_support": "n/a",
+        "quant_confidence": 0.0,
+        "signal_agreement": "n/a",
+        "signal_confidence": 0.0
+      },
+      "rationale": "AAPL has positive narrative momentum driven by iPhone upgrade cycle commentary and services revenue growth themes in recent coverage. Compared to its tech peers in the watchlist, it offers a more defensive profile with lower regulatory risk. The seeded profile highlights a strong installed base moat and consistent free cash flow generation. The primary risk is a consumer spending slowdown compressing hardware demand. Overall the narrative supports a Buy with solid confidence.",
+      "key_risk_factors": ["consumer spending slowdown", "China market regulatory pressure"]
+    },
+    "GS": {
+      "action": "Buy",
+      "conviction": {
+        "narrative_alignment": "moderate",
+        "narrative_confidence": 5.5,
+        "quant_support": "n/a",
+        "quant_confidence": 0.0,
+        "signal_agreement": "n/a",
+        "signal_confidence": 0.0
+      },
+      "rationale": "GS narrative is mixed: deal-making activity is recovering per recent headlines but trading revenue faces a tougher comparison period. Among financials in the watchlist, GS ranks in the middle for narrative strength. The profile notes cyclical sensitivity to capital markets activity. Confidence is moderate given the mixed signals. The key risk is a deal pipeline slowdown if rates stay elevated longer.",
+      "key_risk_factors": ["deal pipeline slowdown", "elevated rates compressing IB fees"]
+    },
+    "VZ": {
+      "action": "Hold",
+      "conviction": {
+        "narrative_alignment": "very_weak",
+        "narrative_confidence": 2.0,
+        "quant_support": "n/a",
+        "quant_confidence": 0.0,
+        "signal_agreement": "n/a",
+        "signal_confidence": 0.0
+      },
+      "rationale": "VZ narrative is weak: coverage focuses on debt load concerns and subscriber loss to competitors. Among the watchlist, VZ ranks near the bottom for narrative momentum. The seeded profile confirms high leverage and limited near-term catalysts. Confidence is low as there is little evidence of a near-term turnaround. Holding rather than buying until clearer positive evidence emerges.",
+      "key_risk_factors": ["debt refinancing risk at higher rates", "subscriber churn acceleration"]
+    }
+  }
+}"""
 
 def _build_assessment_prompt(
     agent_a_output: dict,
@@ -416,13 +538,22 @@ def _normalize_response(data: dict, known_tickers: set[str] | None = None) -> di
             elif lower in ("hold", "buy", "trim", "exit"):
                 entry["action"] = lower.capitalize()
 
-        # Normalize conviction values to lowercase
+        # Normalize conviction values to lowercase; clamp confidence scores.
         conviction = entry.get("conviction")
         if isinstance(conviction, dict):
             for key in ("narrative_alignment", "quant_support", "signal_agreement"):
                 val = conviction.get(key)
                 if isinstance(val, str):
                     conviction[key] = val.lower()
+            for conf_key in ("narrative_confidence", "quant_confidence", "signal_confidence"):
+                raw = conviction.get(conf_key)
+                if raw is not None:
+                    try:
+                        conviction[conf_key] = max(0.0, min(10.0, float(raw)))
+                    except (TypeError, ValueError):
+                        conviction[conf_key] = 5.0
+                else:
+                    conviction[conf_key] = 5.0
 
         # Coerce key_risk_factors from string to list
         krf = entry.get("key_risk_factors")
@@ -552,8 +683,11 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
                 "action": "Hold",
                 "conviction": {
                     "narrative_alignment": "weak",
+                    "narrative_confidence": 2.0,
                     "quant_support": "n/a",
+                    "quant_confidence": 0.0,
                     "signal_agreement": "n/a",
+                    "signal_confidence": 0.0,
                 },
                 "rationale": "Cloud LLM extraction failed — using degraded output.",
                 "key_risk_factors": [],
@@ -563,8 +697,11 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
                 "action": "assessment",
                 "conviction": {
                     "narrative_alignment": "weak",
+                    "narrative_confidence": 2.0,
                     "quant_support": "weak",
+                    "quant_confidence": 2.0,
                     "signal_agreement": "weak",
+                    "signal_confidence": 2.0,
                 },
                 "rationale": "Cloud LLM extraction failed — using degraded output.",
                 "key_risk_factors": [],
@@ -575,8 +712,11 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
                 "action": "Hold",
                 "conviction": {
                     "narrative_alignment": "weak",
+                    "narrative_confidence": 2.0,
                     "quant_support": "weak",
+                    "quant_confidence": 2.0,
                     "signal_agreement": "weak",
+                    "signal_confidence": 2.0,
                 },
                 "rationale": "Cloud LLM extraction failed — using degraded output.",
                 "key_risk_factors": [],
@@ -824,7 +964,7 @@ async def run_agent_c(
     # Store raw output
     store_agent_output(conn, run_id, "C", result)
 
-    # Store per-ticker recommendations
-    store_recommendations(conn, run_id, result["per_ticker"])
+    # Store per-ticker recommendations (pass quant_assessment so Agent B metrics land in key_quant_metrics)
+    store_recommendations(conn, run_id, result["per_ticker"], quant_assessment=agent_b_output)
 
     return result

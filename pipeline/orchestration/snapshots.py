@@ -34,12 +34,17 @@ def record_snapshot(
     per_ticker: dict[str, dict] = {}
     holdings_value = 0.0
 
+    # Select valuation price based on run type:
+    # Pre-open: previous_close (settled price before today's open).
+    # Post-close: current_price (today's closing price).
+    val_key = "previous_close" if run_type == "pre_open" else "current_price"
+
     for row in holdings:
         ticker = row["ticker"]
         shares = row["shares"]
 
         if market_data and ticker in market_data:
-            price = market_data[ticker]["current_price"]
+            price = market_data[ticker].get(val_key) or market_data[ticker].get("current_price", 0.0)
         else:
             price = 0.0
 

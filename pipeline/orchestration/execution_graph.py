@@ -39,12 +39,16 @@ async def position_sizing_node(state: PipelineState) -> dict:
     risk_assessment = state.get("risk_assessment", {})
     agent_c_per_ticker = risk_assessment.get("per_ticker", {})
 
-    # Build fill prices from ingestion market data (use open_price)
+    # Build fill prices from ingestion market data.
+    # Pre-open: use previous_close (most recent settled price before market opens).
+    # Post-close: use open_price (the price at which trades occurred that day).
     ingestion = state.get("ingestion_result", {})
     market_data = ingestion.get("market_data", {})
+    run_type = state.get("run_type", "pre_open")
+    price_key = "previous_close" if run_type == "pre_open" else "open_price"
     fill_prices = {
-        ticker: md["open_price"] for ticker, md in market_data.items()
-        if "open_price" in md
+        ticker: md[price_key] for ticker, md in market_data.items()
+        if price_key in md
     }
 
     conn = get_connection(state["db_path"])

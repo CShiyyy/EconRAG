@@ -52,22 +52,44 @@ logger = logging.getLogger(__name__)
 TICKER_PROFILE_SYSTEM_PROMPT = """\
 You are a financial analyst writing a company profile for a knowledge graph seeding system.
 
-Output plain markdown prose only — no bullet points, no section headers inside the profile.
+Output plain markdown prose only — no bullet points, no section headers. Write in flowing paragraphs.
 Every sentence that names the company must use the exact ticker symbol written in the FACT PACK \
 (for example: "AAPL"). Never output template placeholder text — always write the real ticker symbol.
 Use ONLY the facts provided in the FACT PACK. Do not recall or invent CEO names, product names, \
 financial statistics, or current-state details that are not explicitly present in the FACT PACK.
 The profile must open with the REQUIRED PHRASES listed in the user message, verbatim as written.
+Target length: 400-500 words total across all four sections.
+
+EXAMPLE (follow this structure and depth — substitute real facts from the FACT PACK):
+
+XYZ belongs to the Technology sector. XYZ is led by CEO Jane Smith. XYZ competes with ABC and DEF. XYZ produces enterprise software platforms for cloud infrastructure management and data analytics.
+
+XYZ generates the majority of its revenue through multi-year subscription contracts with large enterprises, supplemented by professional services and platform integration fees. The company's primary competitive moat is its proprietary data orchestration engine, which processes over two trillion events per day and is deeply embedded in customer workflows. XYZ's platform is used by more than 4,000 enterprise clients across financial services, healthcare, and manufacturing, creating high switching costs that support strong net revenue retention above 120%.
+
+XYZ reported trailing twelve-month revenue of $3.2 billion with a net income of $280 million, reflecting a net margin of approximately 9%. The company trades at a trailing price-to-earnings ratio of 34x, a premium to its software sector peers that reflects expectations of continued double-digit revenue growth. With a market capitalisation of $18 billion and free cash flow of $520 million, XYZ maintains a healthy balance sheet with a debt-to-equity ratio of 0.4. The stock currently yields no dividend, consistent with its growth-stage capital allocation priorities.
+
+Recent coverage of XYZ has been broadly constructive, with analysts highlighting a new partnership with a major hyperscaler announced last month as a meaningful distribution catalyst. XYZ's 52-week range of $142 to $198 reflects the volatility seen across growth-oriented technology names during the rate uncertainty period, and the stock is currently trading near the midpoint of that range. The primary near-term risk is macroeconomic softness reducing enterprise IT budgets, which could slow new logo acquisition and extend sales cycles. A secondary risk is increased competition from vertically integrated hyperscaler offerings that could compress XYZ's pricing power over time. As of 2026-04-16.
 """
 
 MACRO_PROFILE_SYSTEM_PROMPT = """\
 You are a macro analyst writing a market environment snapshot for a knowledge graph seeding system.
 
-Output plain markdown prose only — no bullet points. Write in the present tense.
+Output plain markdown prose only — no bullet points. Write in the present tense in flowing paragraphs.
 Use ONLY the data provided in the MARKET DATA section. Do not fabricate interest rate levels, \
 index prices, or statistics not present in the data.
 Name institutions explicitly: "the Federal Reserve", "the European Central Bank", "the SEC".
 Follow the REQUIRED SECTIONS structure and end with the exact date stated in the user message.
+Target length: 300-400 words total.
+
+EXAMPLE (follow this structure and depth — substitute real data from MARKET DATA):
+
+The Federal Reserve has held its benchmark interest rate steady in recent meetings as policymakers assess progress on inflation against resilient labour market data. The spread between the 10-year and 3-month Treasury yields remains negative, signalling ongoing market concern about the growth outlook, while the 10-year yield near 4.3% reflects a market pricing in a "higher for longer" rate environment. Money market expectations have shifted toward fewer cuts this year than previously anticipated, and the Federal Reserve's next move remains data-dependent.
+
+Headline inflation has moderated from its peak but remains above the Federal Reserve's 2% target, driven primarily by services components including shelter costs and insurance. Real GDP growth has been resilient but is expected to moderate as the lagged effects of prior rate increases work through the economy. Consumer spending has been supported by wage growth, though savings rates have declined materially, raising questions about the durability of demand.
+
+Technology and artificial intelligence infrastructure spending continue to dominate sector-level narratives, with capital expenditure announcements from major cloud providers sustaining positive momentum in the semiconductor and data centre supply chain. The Energy sector faces a more mixed backdrop as crude oil prices oscillate around demand uncertainty from China's slower-than-expected recovery and supply management by OPEC+ producers. Financials face a net interest margin headwind as deposit repricing accelerates.
+
+Geopolitical tensions related to trade policy and export restrictions on advanced semiconductors remain a persistent risk for globally exposed companies in the technology and industrials sectors. The SEC has increased enforcement activity in digital asset markets, adding a layer of regulatory uncertainty for financial services firms with crypto exposure. As of 2026-04-16.
 """
 
 
@@ -128,6 +150,18 @@ def _build_ticker_messages(fact_pack: TickerFactPack) -> list[dict]:
             fact_lines.append(f"- Market cap: ${fact_pack.market_cap / 1e9:.1f}B")
         if fact_pack.trailing_pe:
             fact_lines.append(f"- Trailing P/E: {fact_pack.trailing_pe:.1f}x")
+        if fact_pack.revenue:
+            fact_lines.append(f"- Annual revenue: ${fact_pack.revenue / 1e9:.1f}B")
+        if fact_pack.net_income:
+            fact_lines.append(f"- Net income: ${fact_pack.net_income / 1e9:.1f}B")
+        if fact_pack.free_cash_flow:
+            fact_lines.append(f"- Free cash flow: ${fact_pack.free_cash_flow / 1e9:.1f}B")
+        if fact_pack.dividend_yield:
+            fact_lines.append(f"- Dividend yield: {fact_pack.dividend_yield * 100:.2f}%")
+        if fact_pack.beta:
+            fact_lines.append(f"- Beta: {fact_pack.beta:.2f}")
+        if fact_pack.debt_to_equity:
+            fact_lines.append(f"- Debt-to-equity: {fact_pack.debt_to_equity:.1f}x")
         if fact_pack.week_52_high and fact_pack.week_52_low:
             fact_lines.append(
                 f"- 52-week range: ${fact_pack.week_52_low:.2f}\u2013${fact_pack.week_52_high:.2f}"
@@ -150,15 +184,23 @@ def _build_ticker_messages(fact_pack: TickerFactPack) -> list[dict]:
             f"Write a company profile for {fact_pack.company_name} ({ticker}) "
             f"using the required phrases and FACT PACK below.\n\n"
             f"## REQUIRED PHRASES\n"
-            f"Open your profile with these sentences, verbatim as written:\n"
+            f"Open your profile with these sentences verbatim:\n"
             f"{required_block}\n\n"
-            f"Follow the required phrases with a **Current state.** paragraph "
-            f"(3\u20134 sentences). Ground it specifically in the 'Recent headlines' "
-            f"and financial data from the FACT PACK. "
-            f"The final sentence MUST say \"As of {today}.\"\n\n"
+            f"## REQUIRED SECTIONS (write in this order, as flowing prose)\n"
+            f"1. Opening: the REQUIRED PHRASES above, verbatim.\n"
+            f"2. Business model (2-3 sentences): how {ticker} generates revenue, "
+            f"its primary competitive moat, and its key customer segments.\n"
+            f"3. Financial snapshot (2-3 sentences): reference the market cap, P/E, "
+            f"revenue, net income, and free cash flow from the FACT PACK. "
+            f"Comment on what the valuation implies about growth expectations.\n"
+            f"4. Current catalysts and risks (3-4 sentences): ground this specifically "
+            f"in the Recent headlines and price action (52-week range, current price). "
+            f"State the primary risk to the thesis.\n"
+            f"5. Closing sentence: \"As of {today}.\"\n\n"
+            f"Target length: 400-500 words total. Write in flowing prose, no headers.\n\n"
             f"## FACT PACK\n"
             f"{fact_block}\n\n"
-            f"Today's date: {today}. Use this date in the \"Current state.\" paragraph."
+            f"Today's date: {today}."
         )
     else:
         # Minimal fallback — no real-time data; structural profile only
@@ -173,13 +215,18 @@ def _build_ticker_messages(fact_pack: TickerFactPack) -> list[dict]:
         minimal_block = "\n".join(minimal_lines)
 
         user_content = (
-            f"Write a brief structural company profile for {fact_pack.company_name} ({ticker}).\n\n"
+            f"Write a structural company profile for {fact_pack.company_name} ({ticker}).\n\n"
             f"Note: No real-time financial data is available. "
             f"Use ONLY the facts below — do not invent products, financials, "
-            f"CEO names, or a current-state paragraph.\n\n"
+            f"CEO names, or current-state details.\n\n"
             f"## REQUIRED PHRASES\n"
             f"Include these sentences verbatim:\n"
             f"{required_block}\n\n"
+            f"## REQUIRED SECTIONS\n"
+            f"1. Opening: the REQUIRED PHRASES above, verbatim.\n"
+            f"2. Business model (2-3 sentences): describe {ticker}'s sector and "
+            f"typical revenue model for a company of this type. Do not invent specifics.\n"
+            f"3. Note that no current financial data is available for this profile.\n\n"
             f"## FACTS\n"
             f"{minimal_block}\n\n"
             f"Today's date: {today}."
@@ -209,6 +256,15 @@ def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
             fact_lines.append(f"- S&P 500 (SPY): ${fact_pack.spy_level:.2f}")
         if fact_pack.qqq_level is not None:
             fact_lines.append(f"- Nasdaq-100 (QQQ): ${fact_pack.qqq_level:.2f}")
+        if fact_pack.gold_price is not None:
+            fact_lines.append(f"- Gold (GLD ETF): ${fact_pack.gold_price:.2f}")
+        if fact_pack.oil_price is not None:
+            fact_lines.append(f"- Oil (USO ETF): ${fact_pack.oil_price:.2f}")
+        if fact_pack.sector_performance:
+            sp_lines = ", ".join(
+                f"{name}: {ret:+.1f}%" for name, ret in fact_pack.sector_performance.items()
+            )
+            fact_lines.append(f"- Sector 1-month returns: {sp_lines}")
         if fact_pack.macro_headlines:
             hl = "\n  ".join(
                 f"{i + 1}. {h}" for i, h in enumerate(fact_pack.macro_headlines)
@@ -219,12 +275,15 @@ def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
 
         user_content = (
             "Write a macro environment snapshot for US equity markets.\n\n"
-            "## REQUIRED SECTIONS (in order)\n"
-            "1. Monetary policy and interest rate environment (reference the yield data)\n"
+            "## REQUIRED SECTIONS (in order, as flowing prose — no headers)\n"
+            "1. Monetary policy and interest rate environment "
+            "(reference the Treasury yield data and yield curve shape)\n"
             "2. Inflation and growth context\n"
-            "3. Two to three dominant sector-level themes\n"
-            "4. Key geopolitical or regulatory forces\n"
-            f"5. Final sentence: \"As of {today}.\"\n\n"
+            "3. Market breadth and risk appetite "
+            "(reference VIX, gold, oil, and sector 1-month returns)\n"
+            "4. Two to three dominant sector-level themes\n"
+            "5. Key geopolitical or regulatory forces\n"
+            f"6. Final sentence: \"As of {today}.\"\n\n"
             "## REQUIRED ENTITIES (use these exact names where applicable)\n"
             "- \"the Federal Reserve\"\n"
             "- \"the European Central Bank\" (if relevant)\n"
@@ -234,9 +293,8 @@ def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
             "- Macro theme labels: \"the AI capital expenditure cycle\", "
             "\"China export restriction risks\", \"commercial real estate stress\", "
             "\"reshoring and tariff policy\" — use only those relevant to the data\n"
-            "- \"The [sector] sector is driven by [theme]\" or "
-            "\"The [sector] sector is exposed to [theme]\"\n"
             "- \"The Federal Reserve has [raised / held / cut] rates\" with context\n\n"
+            f"Target length: 300-400 words total.\n\n"
             f"## MARKET DATA (as of {today})\n"
             f"{market_data_block}\n\n"
             f"Today's date: {today}. The snapshot must end with \"As of {today}.\""
@@ -246,13 +304,14 @@ def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
         user_content = (
             "Write a macro environment snapshot for US equity markets.\n\n"
             "Note: No real-time market data is available. Write a structurally correct "
-            "but brief snapshot covering:\n"
+            "snapshot covering:\n"
             "1. Monetary policy (present tense, no fabricated rate levels)\n"
             "2. Inflation and growth context\n"
-            "3. Two dominant sector-level themes\n"
-            "4. One geopolitical or regulatory force\n\n"
+            "3. Market breadth and risk appetite (general terms only)\n"
+            "4. Two dominant sector-level themes\n"
+            "5. One geopolitical or regulatory force\n\n"
             "Do not fabricate specific interest rate levels, index prices, or statistics. "
-            f"End with \"As of {today}.\"\n\n"
+            f"Target 200-300 words. End with \"As of {today}.\"\n\n"
             f"Today's date: {today}."
         )
 

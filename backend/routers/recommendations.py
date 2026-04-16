@@ -17,6 +17,8 @@ def _parse_recommendation(row: sqlite3.Row) -> dict:
         d["conviction_scores"] = json.loads(d["conviction_scores"])
     if d.get("key_quant_metrics"):
         d["key_quant_metrics"] = json.loads(d["key_quant_metrics"])
+    if d.get("key_risk_factors"):
+        d["key_risk_factors"] = json.loads(d["key_risk_factors"])
     return d
 
 

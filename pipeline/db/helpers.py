@@ -133,24 +133,36 @@ def store_recommendations(
     per_ticker: dict[str, dict],
     requery_triggered: bool = False,
     requery_reason: str | None = None,
+    quant_assessment: dict | None = None,
 ) -> list[int]:
     """Insert per-ticker recommendations from Agent C output.
 
     Each ticker entry becomes a row in the recommendations table.
     conviction_weight is null (computed later by Position Sizing Engine).
+    key_quant_metrics stores Agent B metrics; key_risk_factors stores Agent C risk list.
     Returns list of recommendation_ids.
     """
     from datetime import datetime, timezone
 
     ts = datetime.now(timezone.utc).isoformat()
     ids: list[int] = []
+    per_ticker_quant = (quant_assessment or {}).get("per_ticker", {})
+
     for ticker, entry in per_ticker.items():
+        # Extract real Agent B metrics for this ticker
+        quant_data = per_ticker_quant.get(ticker, {})
+        quant_metrics = {
+            k: quant_data.get(k)
+            for k in ("drift", "volatility_30d", "health_score", "current_weight", "flags")
+            if quant_data.get(k) is not None
+        }
+
         cursor = conn.execute(
             """INSERT INTO recommendations
                (run_id, timestamp, ticker, action, conviction_scores,
-                conviction_weight, rationale, key_quant_metrics,
+                conviction_weight, rationale, key_quant_metrics, key_risk_factors,
                 requery_triggered, requery_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 ts,
@@ -159,6 +171,7 @@ def store_recommendations(
                 json.dumps(entry.get("conviction", {})),
                 None,
                 entry.get("rationale", ""),
+                json.dumps(quant_metrics) if quant_metrics else None,
                 json.dumps(entry.get("key_risk_factors", [])),
                 1 if requery_triggered else 0,
                 requery_reason,

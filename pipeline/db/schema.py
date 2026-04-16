@@ -95,6 +95,7 @@ TABLES_SQL: list[str] = [
         conviction_weight REAL,
         rationale         TEXT    NOT NULL,
         key_quant_metrics TEXT,
+        key_risk_factors  TEXT,
         requery_triggered INTEGER NOT NULL DEFAULT 0,
         requery_reason    TEXT
     )
@@ -184,6 +185,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     """
     migrations = [
         "ALTER TABLE kg_seed_log ADD COLUMN seed_text TEXT",
+        "ALTER TABLE recommendations ADD COLUMN key_risk_factors TEXT",
     ]
     for sql in migrations:
         try:

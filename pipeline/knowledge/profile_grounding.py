@@ -20,10 +20,22 @@ _MACRO_KEYWORDS = frozenset({
     "fed", "federal reserve", "fomc", "inflation", "interest rate",
     "rate hike", "rate cut", "cpi", "pce", "gdp", "recession",
 })
-_MAX_HEADLINES = 5
-_BUSINESS_SUMMARY_MAX_CHARS = 1500
+_MAX_HEADLINES = 10
+_BUSINESS_SUMMARY_MAX_CHARS = 4000
 _MAX_PEER_TICKERS = 5
 _MACRO_NEWS_TICKERS = ("SPY", "QQQ", "^TNX")
+
+# Sector ETFs for 1-month return snapshot in MacroFactPack.
+_SECTOR_ETFS = {
+    "Technology": "XLK",
+    "Financials": "XLF",
+    "Energy": "XLE",
+    "Healthcare": "XLV",
+    "Industrials": "XLI",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Utilities": "XLU",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +57,12 @@ class TickerFactPack:
     week_52_high: float | None = None
     week_52_low: float | None = None
     current_price: float | None = None
+    revenue: float | None = None
+    net_income: float | None = None
+    free_cash_flow: float | None = None
+    dividend_yield: float | None = None
+    beta: float | None = None
+    debt_to_equity: float | None = None
     peer_tickers: list[str] = field(default_factory=list)
     recent_headlines: list[str] = field(default_factory=list)
     fetched_at: str = ""
@@ -60,6 +78,9 @@ class MacroFactPack:
     dxy: float | None = None
     spy_level: float | None = None
     qqq_level: float | None = None
+    gold_price: float | None = None
+    oil_price: float | None = None
+    sector_performance: dict[str, float] = field(default_factory=dict)
     macro_headlines: list[str] = field(default_factory=list)
     fetched_at: str = ""
     grounding_available: bool = True
@@ -109,6 +130,21 @@ def _fetch_macro_price_sync(yf_ticker: str) -> float | None:
     except Exception as exc:
         logger.warning("yfinance macro price failed for %s: %s", yf_ticker, exc)
         return None
+
+
+def _fetch_sector_return_sync(etf: str) -> float | None:
+    """Fetch approximate 1-month return for a sector ETF."""
+    try:
+        hist = yf.Ticker(etf).history(period="1mo")
+        if hist.empty or len(hist) < 2:
+            return None
+        start = hist["Close"].iloc[0]
+        end = hist["Close"].iloc[-1]
+        if start and start > 0:
+            return round((end - start) / start * 100, 2)
+    except Exception as exc:
+        logger.warning("yfinance sector return failed for %s: %s", etf, exc)
+    return None
 
 
 def _fetch_macro_headlines_sync() -> list[str]:
@@ -196,6 +232,12 @@ async def fetch_ticker_fact_pack(
         week_52_high=info.get("fiftyTwoWeekHigh"),
         week_52_low=info.get("fiftyTwoWeekLow"),
         current_price=info.get("currentPrice") or info.get("regularMarketPrice"),
+        revenue=info.get("totalRevenue"),
+        net_income=info.get("netIncomeToCommon"),
+        free_cash_flow=info.get("freeCashflow"),
+        dividend_yield=info.get("dividendYield"),
+        beta=info.get("beta"),
+        debt_to_equity=info.get("debtToEquity"),
         peer_tickers=peer_tickers,
         recent_headlines=headlines,
         fetched_at=fetched_at,
@@ -210,23 +252,31 @@ async def fetch_macro_fact_pack() -> MacroFactPack:
     """
     fetched_at = datetime.now(timezone.utc).isoformat()
 
-    (
-        treasury_10y,
-        treasury_3m,
-        vix,
-        dxy,
-        spy_level,
-        qqq_level,
-        macro_headlines,
-    ) = await asyncio.gather(
+    sector_etf_tasks = [
+        asyncio.to_thread(_fetch_sector_return_sync, etf)
+        for etf in _SECTOR_ETFS.values()
+    ]
+
+    results = await asyncio.gather(
         asyncio.to_thread(_fetch_macro_price_sync, "^TNX"),
         asyncio.to_thread(_fetch_macro_price_sync, "^IRX"),
         asyncio.to_thread(_fetch_macro_price_sync, "^VIX"),
         asyncio.to_thread(_fetch_macro_price_sync, "DX-Y.NYB"),
         asyncio.to_thread(_fetch_macro_price_sync, "SPY"),
         asyncio.to_thread(_fetch_macro_price_sync, "QQQ"),
+        asyncio.to_thread(_fetch_macro_price_sync, "GLD"),
+        asyncio.to_thread(_fetch_macro_price_sync, "USO"),
         asyncio.to_thread(_fetch_macro_headlines_sync),
+        *sector_etf_tasks,
     )
+
+    treasury_10y, treasury_3m, vix, dxy, spy_level, qqq_level, gold_price, oil_price, macro_headlines = results[:9]
+    sector_returns_raw = results[9:]
+
+    sector_performance: dict[str, float] = {}
+    for name, ret in zip(_SECTOR_ETFS.keys(), sector_returns_raw):
+        if ret is not None:
+            sector_performance[name] = ret
 
     grounding_available = any(
         v is not None for v in (treasury_10y, vix, spy_level)
@@ -239,6 +289,9 @@ async def fetch_macro_fact_pack() -> MacroFactPack:
         dxy=dxy,
         spy_level=spy_level,
         qqq_level=qqq_level,
+        gold_price=gold_price,
+        oil_price=oil_price,
+        sector_performance=sector_performance,
         macro_headlines=macro_headlines,
         fetched_at=fetched_at,
         grounding_available=grounding_available,

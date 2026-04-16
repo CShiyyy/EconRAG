@@ -119,16 +119,45 @@ export default function RecommendationsPage() {
                               <span className="text-gray-600">{r.rationale}</span>
                             </div>
                           )}
-                          {r.risk_factors && (
+                          {r.key_quant_metrics && Object.keys(r.key_quant_metrics).length > 0 && (
                             <div>
-                              <span className="font-medium text-gray-700">Risk Factors: </span>
-                              <span className="text-gray-600">{r.risk_factors}</span>
+                              <span className="font-medium text-gray-700 block mb-1">Quant Metrics:</span>
+                              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-gray-600 pl-2">
+                                {r.key_quant_metrics.drift != null && (
+                                  <div>
+                                    <span className="text-gray-500">Drift: </span>
+                                    <span className={r.key_quant_metrics.drift > 0 ? 'text-green-600' : r.key_quant_metrics.drift < 0 ? 'text-red-600' : ''}>
+                                      {(r.key_quant_metrics.drift * 100).toFixed(2)}%
+                                    </span>
+                                  </div>
+                                )}
+                                {r.key_quant_metrics.volatility_30d != null && (
+                                  <div><span className="text-gray-500">30d Vol: </span>{(r.key_quant_metrics.volatility_30d * 100).toFixed(1)}%</div>
+                                )}
+                                {r.key_quant_metrics.current_weight != null && (
+                                  <div><span className="text-gray-500">Weight: </span>{(r.key_quant_metrics.current_weight * 100).toFixed(2)}%</div>
+                                )}
+                                {r.key_quant_metrics.health_score && (
+                                  <div>
+                                    <span className="text-gray-500">Health: </span>
+                                    <span className={
+                                      r.key_quant_metrics.health_score === 'normal' ? 'text-green-600' :
+                                      r.key_quant_metrics.health_score === 'warning' ? 'text-yellow-600' : 'text-red-600'
+                                    }>{r.key_quant_metrics.health_score}</span>
+                                  </div>
+                                )}
+                                {r.key_quant_metrics.flags?.length > 0 && (
+                                  <div className="col-span-2"><span className="text-gray-500">Flags: </span>{r.key_quant_metrics.flags.join(', ')}</div>
+                                )}
+                              </div>
                             </div>
                           )}
-                          {r.key_quant_metrics && (
+                          {r.key_risk_factors?.length > 0 && (
                             <div>
-                              <span className="font-medium text-gray-700">Quant Metrics: </span>
-                              <span className="text-gray-600">{JSON.stringify(r.key_quant_metrics)}</span>
+                              <span className="font-medium text-gray-700 block mb-1">Risk Factors:</span>
+                              <ul className="list-disc list-inside pl-2 text-gray-600 space-y-0.5">
+                                {r.key_risk_factors.map((rf, i) => <li key={i}>{rf}</li>)}
+                              </ul>
                             </div>
                           )}
                         </div>
