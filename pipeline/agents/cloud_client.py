@@ -225,3 +225,37 @@ def create_cloud_client() -> CloudLLMClient:
         return GeminiClient()
 
     raise ValueError(f"Unsupported CLOUD_PROVIDER: {CLOUD_PROVIDER!r}")
+
+
+def create_seeding_client() -> CloudLLMClient:
+    """Factory for the profile-seeding LLM client.
+
+    Profile seeding runs once at init and benefits from a stronger model.
+    Prefers Gemini when GEMINI_API_KEY is available; falls back to Ollama
+    silently so initialization is never blocked by a missing API key.
+
+    SEEDING_LLM_PROVIDER values:
+      "auto"   — Gemini if GEMINI_API_KEY is set, else Ollama (default)
+      "gemini" — Gemini always; raises CloudAuthError if key is missing
+      "ollama" — Ollama always
+    """
+    from pipeline.config import SEEDING_LLM_PROVIDER
+
+    if SEEDING_LLM_PROVIDER == "ollama":
+        return OllamaClient()
+
+    if SEEDING_LLM_PROVIDER == "gemini":
+        return GeminiClient()  # raises CloudAuthError if key missing
+
+    # "auto": prefer Gemini, fall back to Ollama without raising
+    if GEMINI_API_KEY:
+        try:
+            return GeminiClient()
+        except CloudAuthError as exc:
+            logger.warning(
+                "Gemini seeding client unavailable (%s) — falling back to Ollama", exc
+            )
+            return OllamaClient()
+
+    logger.info("GEMINI_API_KEY not set — using Ollama for profile seeding")
+    return OllamaClient()

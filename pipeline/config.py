@@ -68,3 +68,7 @@ CLOUD_RETRY_BASE_DELAY: float = 1.0
 PROFILE_SEED_ENABLED: bool = os.getenv("PROFILE_SEED_ENABLED", "true").lower() != "false"
 PROFILE_SEED_TTL_HOURS: int = int(os.getenv("PROFILE_SEED_TTL_HOURS", "720"))  # 30 days for Tier 2 macro edges
 PROFILE_SEED_CONCURRENCY: int = int(os.getenv("PROFILE_SEED_CONCURRENCY", "3"))
+# "auto" -> Gemini if GEMINI_API_KEY is set, else Ollama
+# "gemini" -> Gemini always (raises if key missing)
+# "ollama" -> Ollama always
+SEEDING_LLM_PROVIDER: str = os.getenv("SEEDING_LLM_PROVIDER", "auto")

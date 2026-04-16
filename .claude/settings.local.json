@@ -55,5 +55,19 @@
       "Bash(.venv/Scripts/python.exe -c \"from pipeline.config import LIGHTRAG_STORAGE_DIR; print\\(LIGHTRAG_STORAGE_DIR\\)\")"
     ]
   },
-  "outputStyle": "default"
+  "outputStyle": "default",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code file modified: '+f+'. Update CLAUDE.md and ARCHITECTURE.md now if architectural structure, schema tables, API endpoints, agents, or new modules changed.'}})) if any(x in f for x in ('pipeline','backend')) else None\"",
+            "statusMessage": "Checking if docs need updating..."
+          }
+        ]
+      }
+    ]
+  }
 }

@@ -19,7 +19,7 @@ async def seed_profiles_node(state: PipelineState) -> dict:
     Runs on every pipeline call so new tickers added via watchlist refresh
     are picked up automatically on the next run.
     """
-    from pipeline.agents.cloud_client import create_cloud_client
+    from pipeline.agents.cloud_client import create_seeding_client
     from pipeline.config import PROFILE_SEED_ENABLED
     from pipeline.db.connection import get_connection
     from pipeline.knowledge.lightrag_config import get_rag_instance
@@ -31,7 +31,7 @@ async def seed_profiles_node(state: PipelineState) -> dict:
     conn = get_connection(state["db_path"])
     try:
         rag = await get_rag_instance(state.get("rag_storage_dir"))
-        client = create_cloud_client()
+        client = create_seeding_client()
         result = await seed_missing_profiles(conn, rag, client, state["run_id"])
         return {
             "profile_seed_result": {

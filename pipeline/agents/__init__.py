@@ -3,7 +3,7 @@
 from pipeline.agents.agent_a import run_agent_a
 from pipeline.agents.agent_b import run_agent_b
 from pipeline.agents.agent_c import run_agent_c
-from pipeline.agents.cloud_client import CloudLLMClient, create_cloud_client
+from pipeline.agents.cloud_client import CloudLLMClient, create_cloud_client, create_seeding_client
 
 __all__ = [
     "run_agent_a",
@@ -11,4 +11,5 @@ __all__ = [
     "run_agent_c",
     "CloudLLMClient",
     "create_cloud_client",
+    "create_seeding_client",
 ]

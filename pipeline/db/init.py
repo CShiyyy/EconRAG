@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from pipeline.config import DEFAULT_CONSTRAINTS, VALID_UNIVERSES
-from pipeline.db.schema import create_tables
+from pipeline.db.schema import create_tables, migrate_schema
 from pipeline.scrapers.watchlist import WatchlistEntry, scrape_universe
 
 # Suffixes to strip when generating company name aliases
@@ -115,8 +115,9 @@ def initialize(
         if invalid_keys:
             raise ValueError(f"Unknown constraint keys: {invalid_keys}")
 
-    # Ensure tables exist
+    # Ensure tables exist and apply incremental migrations
     create_tables(conn)
+    migrate_schema(conn)
 
     # Prevent re-initialization
     try:

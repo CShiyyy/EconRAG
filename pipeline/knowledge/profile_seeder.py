@@ -6,6 +6,11 @@ seed profiles for any new tickers added via watchlist refresh.
 
 Idempotency is tracked in the kg_seed_log SQLite table — tickers already
 seeded are skipped, making the node a near-no-op after initialization.
+
+Each profile is grounded in a live TickerFactPack / MacroFactPack fetched from
+yfinance immediately before the LLM call. If yfinance is unavailable for a
+ticker, the seeder falls back to a minimal structural profile rather than
+skipping the ticker entirely.
 """
 
 from __future__ import annotations
@@ -26,6 +31,12 @@ from pipeline.config import (
 )
 from pipeline.knowledge.extraction import extract_from_markdown
 from pipeline.knowledge.graph_ops import insert_validated_data
+from pipeline.knowledge.profile_grounding import (
+    MacroFactPack,
+    TickerFactPack,
+    fetch_macro_fact_pack,
+    fetch_ticker_fact_pack,
+)
 from pipeline.knowledge.validator import validate_extraction
 
 if TYPE_CHECKING:
@@ -39,48 +50,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 TICKER_PROFILE_SYSTEM_PROMPT = """\
-You are a financial analyst writing concise company profiles for a knowledge graph seeding system.
+You are a financial analyst writing a company profile for a knowledge graph seeding system.
 
-Write a factual markdown profile (150-250 words) for the given company. Use the phrasing patterns \
-below so a downstream entity-extraction model can identify relationships:
-
-REQUIRED phrasing patterns (use the exact phrasing where applicable):
-- "{TICKER} belongs to the {sector} sector"
-- "{TICKER} is led by CEO {full name}"
-- "{TICKER} is a constituent of the S&P 500" (include for S&P members; use "Nasdaq-100" or \
-"Dow Jones Industrial Average" as appropriate)
-- "{TICKER} competes with {TICKER_A} and {TICKER_B}" (use ticker symbols for competitors)
-- "{TICKER} produces {product or service name}" (name 2-3 key products or services)
-- End with a "**Current state.**" paragraph describing one or two dominant themes or pressures \
-driving the stock right now (e.g. AI capex cycle, regulatory scrutiny, margin expansion).
-
-Use plain, factual prose. Do not use bullet points. Do not hallucinate — if you are unsure of a \
-specific CEO name or competitor ticker, omit that sentence rather than guess.
+Output plain markdown prose only — no bullet points, no section headers inside the profile.
+Every sentence that names the company must use the exact ticker symbol written in the FACT PACK \
+(for example: "AAPL"). Never output template placeholder text — always write the real ticker symbol.
+Use ONLY the facts provided in the FACT PACK. Do not recall or invent CEO names, product names, \
+financial statistics, or current-state details that are not explicitly present in the FACT PACK.
+The profile must open with the REQUIRED PHRASES listed in the user message, verbatim as written.
 """
 
 MACRO_PROFILE_SYSTEM_PROMPT = """\
-You are a macro analyst writing a concise market environment snapshot for a knowledge graph \
-seeding system.
+You are a macro analyst writing a market environment snapshot for a knowledge graph seeding system.
 
-Write a factual markdown profile (300-400 words) describing the current macro environment. \
-Use the phrasing patterns below so a downstream entity-extraction model can identify entities \
-and relationships:
-
-REQUIRED phrasing patterns (use the exact phrasing where applicable):
-- Name institutions explicitly: "the Federal Reserve", "the European Central Bank", "the SEC"
-- Name key officials: "Federal Reserve Chair {name}" (use the current chair)
-- Name macro themes with explicit sluggable labels, e.g.: "the AI capital expenditure cycle", \
-"China export restriction risks", "commercial real estate stress", "reshoring and tariff policy"
-- "The {sector} sector is driven by {theme}" or "The {sector} sector is exposed to {theme}"
-- "The Federal Reserve has {raised / held / cut} rates" with context on the current stance
-
-REQUIRED sections (in order):
-1. Monetary policy and interest rate environment
-2. Inflation and growth context
-3. Two to three dominant sector-level themes
-4. Key geopolitical or regulatory forces
-
-Use plain, factual prose. Do not use bullet points. Write in the present tense.
+Output plain markdown prose only — no bullet points. Write in the present tense.
+Use ONLY the data provided in the MARKET DATA section. Do not fabricate interest rate levels, \
+index prices, or statistics not present in the data.
+Name institutions explicitly: "the Federal Reserve", "the European Central Bank", "the SEC".
+Follow the REQUIRED SECTIONS structure and end with the exact date stated in the user message.
 """
 
 
@@ -101,30 +88,177 @@ class SeedResult:
 # Prompt builders
 # ---------------------------------------------------------------------------
 
-def _build_ticker_messages(ticker: str, company_name: str, sector: str) -> list[dict]:
+def _build_ticker_messages(fact_pack: TickerFactPack) -> list[dict]:
+    """Build the LLM message list for a ticker profile, grounded in a TickerFactPack.
+
+    Required phrases in the user message are pre-rendered with the real ticker
+    symbol, so any literal copying by the model produces correct output rather
+    than placeholder leakage.
+    """
+    ticker = fact_pack.ticker
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Pre-render required phrases with real ticker (never use {TICKER} as a literal)
+    required_phrases: list[str] = [
+        f'"{ticker} belongs to the {fact_pack.sector} sector."',
+    ]
+    if fact_pack.ceo_name:
+        required_phrases.append(f'"{ticker} is led by CEO {fact_pack.ceo_name}."')
+    if fact_pack.peer_tickers:
+        peers_str = " and ".join(fact_pack.peer_tickers[:2])
+        required_phrases.append(f'"{ticker} competes with {peers_str}."')
+    required_phrases.append(
+        f'"{ticker} produces [describe the key products or services from the Business summary]."'
+    )
+    required_block = "\n".join(f"- {p}" for p in required_phrases)
+
+    if fact_pack.grounding_available:
+        fact_lines: list[str] = [
+            f"- Ticker: {ticker}",
+            f"- Company: {fact_pack.company_name}",
+            f"- Sector: {fact_pack.sector}",
+        ]
+        if fact_pack.industry:
+            fact_lines.append(f"- Industry: {fact_pack.industry}")
+        if fact_pack.ceo_name:
+            fact_lines.append(f"- CEO: {fact_pack.ceo_name}")
+        if fact_pack.employees:
+            fact_lines.append(f"- Employees: {fact_pack.employees:,}")
+        if fact_pack.market_cap:
+            fact_lines.append(f"- Market cap: ${fact_pack.market_cap / 1e9:.1f}B")
+        if fact_pack.trailing_pe:
+            fact_lines.append(f"- Trailing P/E: {fact_pack.trailing_pe:.1f}x")
+        if fact_pack.week_52_high and fact_pack.week_52_low:
+            fact_lines.append(
+                f"- 52-week range: ${fact_pack.week_52_low:.2f}\u2013${fact_pack.week_52_high:.2f}"
+            )
+        if fact_pack.current_price:
+            fact_lines.append(f"- Current price: ${fact_pack.current_price:.2f}")
+        if fact_pack.peer_tickers:
+            fact_lines.append(f"- Sector peers (watchlist): {', '.join(fact_pack.peer_tickers)}")
+        if fact_pack.business_summary:
+            fact_lines.append(f"- Business summary: {fact_pack.business_summary}")
+        if fact_pack.recent_headlines:
+            hl = "\n  ".join(
+                f"{i + 1}. {h}" for i, h in enumerate(fact_pack.recent_headlines)
+            )
+            fact_lines.append(f"- Recent headlines:\n  {hl}")
+
+        fact_block = "\n".join(fact_lines)
+
+        user_content = (
+            f"Write a company profile for {fact_pack.company_name} ({ticker}) "
+            f"using the required phrases and FACT PACK below.\n\n"
+            f"## REQUIRED PHRASES\n"
+            f"Open your profile with these sentences, verbatim as written:\n"
+            f"{required_block}\n\n"
+            f"Follow the required phrases with a **Current state.** paragraph "
+            f"(3\u20134 sentences). Ground it specifically in the 'Recent headlines' "
+            f"and financial data from the FACT PACK. "
+            f"The final sentence MUST say \"As of {today}.\"\n\n"
+            f"## FACT PACK\n"
+            f"{fact_block}\n\n"
+            f"Today's date: {today}. Use this date in the \"Current state.\" paragraph."
+        )
+    else:
+        # Minimal fallback — no real-time data; structural profile only
+        minimal_lines = [
+            f"- Ticker: {ticker}",
+            f"- Company: {fact_pack.company_name}",
+            f"- Sector: {fact_pack.sector}",
+        ]
+        if fact_pack.peer_tickers:
+            minimal_lines.append(f"- Sector peers: {', '.join(fact_pack.peer_tickers)}")
+
+        minimal_block = "\n".join(minimal_lines)
+
+        user_content = (
+            f"Write a brief structural company profile for {fact_pack.company_name} ({ticker}).\n\n"
+            f"Note: No real-time financial data is available. "
+            f"Use ONLY the facts below — do not invent products, financials, "
+            f"CEO names, or a current-state paragraph.\n\n"
+            f"## REQUIRED PHRASES\n"
+            f"Include these sentences verbatim:\n"
+            f"{required_block}\n\n"
+            f"## FACTS\n"
+            f"{minimal_block}\n\n"
+            f"Today's date: {today}."
+        )
+
     return [
         {"role": "system", "content": TICKER_PROFILE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Write a company profile for {company_name} (ticker: {ticker}). "
-                f"It belongs to the {sector} sector."
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
 
 
-def _build_macro_messages() -> list[dict]:
+def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
+    """Build the LLM message list for the macro profile, grounded in a MacroFactPack."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if fact_pack.grounding_available:
+        fact_lines: list[str] = []
+        if fact_pack.treasury_10y is not None:
+            fact_lines.append(f"- 10-year Treasury yield (^TNX): {fact_pack.treasury_10y:.2f}%")
+        if fact_pack.treasury_3m is not None:
+            fact_lines.append(f"- 3-month Treasury yield (^IRX): {fact_pack.treasury_3m:.2f}%")
+        if fact_pack.vix is not None:
+            fact_lines.append(f"- VIX (volatility index): {fact_pack.vix:.2f}")
+        if fact_pack.dxy is not None:
+            fact_lines.append(f"- US Dollar Index (DXY): {fact_pack.dxy:.2f}")
+        if fact_pack.spy_level is not None:
+            fact_lines.append(f"- S&P 500 (SPY): ${fact_pack.spy_level:.2f}")
+        if fact_pack.qqq_level is not None:
+            fact_lines.append(f"- Nasdaq-100 (QQQ): ${fact_pack.qqq_level:.2f}")
+        if fact_pack.macro_headlines:
+            hl = "\n  ".join(
+                f"{i + 1}. {h}" for i, h in enumerate(fact_pack.macro_headlines)
+            )
+            fact_lines.append(f"- Recent macro headlines:\n  {hl}")
+
+        market_data_block = "\n".join(fact_lines) if fact_lines else "(no data fetched)"
+
+        user_content = (
+            "Write a macro environment snapshot for US equity markets.\n\n"
+            "## REQUIRED SECTIONS (in order)\n"
+            "1. Monetary policy and interest rate environment (reference the yield data)\n"
+            "2. Inflation and growth context\n"
+            "3. Two to three dominant sector-level themes\n"
+            "4. Key geopolitical or regulatory forces\n"
+            f"5. Final sentence: \"As of {today}.\"\n\n"
+            "## REQUIRED ENTITIES (use these exact names where applicable)\n"
+            "- \"the Federal Reserve\"\n"
+            "- \"the European Central Bank\" (if relevant)\n"
+            "- \"the SEC\" (if relevant)\n"
+            "- \"Federal Reserve Chair [name]\" — only if a name appears in the headlines; "
+            "omit if uncertain\n"
+            "- Macro theme labels: \"the AI capital expenditure cycle\", "
+            "\"China export restriction risks\", \"commercial real estate stress\", "
+            "\"reshoring and tariff policy\" — use only those relevant to the data\n"
+            "- \"The [sector] sector is driven by [theme]\" or "
+            "\"The [sector] sector is exposed to [theme]\"\n"
+            "- \"The Federal Reserve has [raised / held / cut] rates\" with context\n\n"
+            f"## MARKET DATA (as of {today})\n"
+            f"{market_data_block}\n\n"
+            f"Today's date: {today}. The snapshot must end with \"As of {today}.\""
+        )
+    else:
+        # Minimal fallback — no live market data
+        user_content = (
+            "Write a macro environment snapshot for US equity markets.\n\n"
+            "Note: No real-time market data is available. Write a structurally correct "
+            "but brief snapshot covering:\n"
+            "1. Monetary policy (present tense, no fabricated rate levels)\n"
+            "2. Inflation and growth context\n"
+            "3. Two dominant sector-level themes\n"
+            "4. One geopolitical or regulatory force\n\n"
+            "Do not fabricate specific interest rate levels, index prices, or statistics. "
+            f"End with \"As of {today}.\"\n\n"
+            f"Today's date: {today}."
+        )
+
     return [
         {"role": "system", "content": MACRO_PROFILE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                "Write a macro environment snapshot covering the current state of US equity "
-                "markets: monetary policy, inflation/growth context, dominant sector-level "
-                "narratives, and key geopolitical or regulatory forces."
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
 
 
@@ -202,10 +336,10 @@ async def _seed_single(
     # Stage 5: Record in seed log (only reached on full success)
     conn.execute(
         """
-        INSERT OR REPLACE INTO kg_seed_log (seed_type, seed_key, seeded_at, run_id, source_id)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO kg_seed_log (seed_type, seed_key, seeded_at, run_id, source_id, seed_text)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (seed_type, seed_key, datetime.now(timezone.utc).isoformat(), run_id, source_id),
+        (seed_type, seed_key, datetime.now(timezone.utc).isoformat(), run_id, source_id, markdown),
     )
     conn.commit()
     logger.info("Seeded profile %s:%s (source_id=%s)", seed_type, seed_key, source_id)
@@ -276,13 +410,19 @@ async def seed_missing_profiles(
     async def _seed_ticker(ticker: str, company_name: str, sector: str) -> None:
         async with sem:
             try:
+                fact_pack = await fetch_ticker_fact_pack(conn, ticker, company_name, sector)
+                if not fact_pack.grounding_available:
+                    logger.warning(
+                        "Ticker %s: using minimal ungrounded profile (yfinance unavailable)",
+                        ticker,
+                    )
                 ok = await _seed_single(
                     conn=conn,
                     rag=rag,
                     client=client,
                     seed_type="ticker_profile",
                     seed_key=ticker,
-                    messages=_build_ticker_messages(ticker, company_name, sector),
+                    messages=_build_ticker_messages(fact_pack),
                     source_id=f"profile:{ticker}",
                     run_id=run_id,
                 )
@@ -302,13 +442,16 @@ async def seed_missing_profiles(
     # Seed macro profile (after tickers, sequential)
     if macro_missing:
         try:
+            macro_pack = await fetch_macro_fact_pack()
+            if not macro_pack.grounding_available:
+                logger.warning("Macro profile: using minimal ungrounded profile (yfinance unavailable)")
             ok = await _seed_single(
                 conn=conn,
                 rag=rag,
                 client=client,
                 seed_type="macro_profile",
                 seed_key="macro",
-                messages=_build_macro_messages(),
+                messages=_build_macro_messages(macro_pack),
                 source_id="profile:macro",
                 run_id=run_id,
             )

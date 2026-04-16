@@ -92,3 +92,16 @@ class StandingEventPatch(BaseModel):
 
 class ConstraintPatch(BaseModel):
     constraints: dict[str, float]
+
+
+# --- Profiles ---
+
+class ProfileItem(BaseModel):
+    seed_type: str
+    seed_key: str
+    seeded_at: str
+    source_id: str
+
+
+class ProfileDetail(ProfileItem):
+    seed_text: str | None

@@ -22,6 +22,22 @@ def _seed_run_log(conn, run_type: str = "pre_open") -> int:
     return cur.lastrowid
 
 
+def _minimal_ticker_pack(ticker: str = "AAPL") -> "TickerFactPack":
+    from pipeline.knowledge.profile_grounding import TickerFactPack
+    return TickerFactPack(
+        ticker=ticker,
+        company_name="Apple Inc." if ticker == "AAPL" else f"{ticker} Corp.",
+        sector="Information Technology",
+        peer_tickers=["MSFT", "GOOGL"],
+        grounding_available=False,
+    )
+
+
+def _minimal_macro_pack() -> "MacroFactPack":
+    from pipeline.knowledge.profile_grounding import MacroFactPack
+    return MacroFactPack(grounding_available=False)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -111,7 +127,7 @@ class TestPromptBuilders:
     def test_ticker_messages_structure(self):
         from pipeline.knowledge.profile_seeder import _build_ticker_messages
 
-        msgs = _build_ticker_messages("AAPL", "Apple Inc.", "Information Technology")
+        msgs = _build_ticker_messages(_minimal_ticker_pack("AAPL"))
         assert len(msgs) == 2
         assert msgs[0]["role"] == "system"
         assert msgs[1]["role"] == "user"
@@ -119,20 +135,80 @@ class TestPromptBuilders:
         assert "Apple Inc." in msgs[1]["content"]
         assert "Information Technology" in msgs[1]["content"]
 
-    def test_ticker_system_contains_phrasing_hints(self):
+    def test_ticker_no_placeholder_leak(self):
+        """Neither the system nor user message may contain the literal string {TICKER}."""
         from pipeline.knowledge.profile_seeder import _build_ticker_messages
 
-        msgs = _build_ticker_messages("NVDA", "NVIDIA Corporation", "Semiconductors")
-        system = msgs[0]["content"]
-        assert "belongs to the" in system
-        assert "is led by CEO" in system
-        assert "competes with" in system
-        assert "produces" in system
+        msgs = _build_ticker_messages(_minimal_ticker_pack("NVDA"))
+        assert "{TICKER}" not in msgs[0]["content"]
+        assert "{TICKER}" not in msgs[1]["content"]
+
+    def test_ticker_user_contains_required_phrasing(self):
+        """User message must carry pre-rendered required phrases with the real ticker symbol."""
+        from pipeline.knowledge.profile_seeder import _build_ticker_messages
+        from pipeline.knowledge.profile_grounding import TickerFactPack
+
+        pack = TickerFactPack(
+            ticker="NVDA",
+            company_name="NVIDIA Corporation",
+            sector="Semiconductors",
+            ceo_name="Jensen Huang",
+            peer_tickers=["AMD", "INTC"],
+            grounding_available=False,
+        )
+        msgs = _build_ticker_messages(pack)
+        user = msgs[1]["content"]
+        assert "NVDA belongs to the Semiconductors sector" in user
+        assert "NVDA is led by CEO Jensen Huang" in user
+        assert "NVDA competes with AMD" in user
+
+    def test_ticker_grounded_message_includes_fact_pack(self):
+        """When grounding_available=True the user message must include financial data."""
+        from pipeline.knowledge.profile_seeder import _build_ticker_messages
+        from pipeline.knowledge.profile_grounding import TickerFactPack
+
+        pack = TickerFactPack(
+            ticker="AAPL",
+            company_name="Apple Inc.",
+            sector="Information Technology",
+            ceo_name="Tim Cook",
+            market_cap=3_190_000_000_000,
+            trailing_pe=31.2,
+            week_52_high=237.49,
+            week_52_low=164.08,
+            current_price=197.30,
+            business_summary="Apple Inc. designs and manufactures smartphones.",
+            recent_headlines=["Apple Reports Q2 Results", "iPhone sales recover in China"],
+            peer_tickers=["MSFT", "GOOGL"],
+            grounding_available=True,
+        )
+        msgs = _build_ticker_messages(pack)
+        user = msgs[1]["content"]
+        assert "Tim Cook" in user
+        assert "3190.0B" in user or "3,190" in user or "3190" in user or "$3190" in user or "3.19" in user
+        assert "Apple Inc. designs" in user
+        assert "Apple Reports Q2 Results" in user
+
+    def test_ticker_grounded_includes_today_date(self):
+        """User message for a grounded profile must include today's date."""
+        from pipeline.knowledge.profile_seeder import _build_ticker_messages
+        from pipeline.knowledge.profile_grounding import TickerFactPack
+        from datetime import datetime, timezone
+
+        pack = TickerFactPack(
+            ticker="AAPL",
+            company_name="Apple Inc.",
+            sector="Information Technology",
+            grounding_available=True,
+        )
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        msgs = _build_ticker_messages(pack)
+        assert today in msgs[1]["content"]
 
     def test_macro_messages_structure(self):
         from pipeline.knowledge.profile_seeder import _build_macro_messages
 
-        msgs = _build_macro_messages()
+        msgs = _build_macro_messages(_minimal_macro_pack())
         assert len(msgs) == 2
         assert msgs[0]["role"] == "system"
         assert msgs[1]["role"] == "user"
@@ -141,10 +217,31 @@ class TestPromptBuilders:
     def test_macro_system_contains_institution_hints(self):
         from pipeline.knowledge.profile_seeder import _build_macro_messages
 
-        msgs = _build_macro_messages()
+        msgs = _build_macro_messages(_minimal_macro_pack())
         system = msgs[0]["content"]
         assert "Federal Reserve" in system
-        assert "monetary policy" in system.lower()
+        # monetary policy appears in the user message REQUIRED SECTIONS
+        user = msgs[1]["content"]
+        assert "monetary policy" in user.lower()
+
+    def test_macro_grounded_message_includes_market_data(self):
+        """When grounding_available=True the user message must include fetched rate/VIX data."""
+        from pipeline.knowledge.profile_seeder import _build_macro_messages
+        from pipeline.knowledge.profile_grounding import MacroFactPack
+
+        pack = MacroFactPack(
+            treasury_10y=4.32,
+            vix=18.5,
+            spy_level=520.10,
+            macro_headlines=["Fed holds rates steady", "CPI rises 0.3% in March"],
+            grounding_available=True,
+        )
+        msgs = _build_macro_messages(pack)
+        user = msgs[1]["content"]
+        assert "4.32" in user
+        assert "18.50" in user
+        assert "520.10" in user
+        assert "Fed holds rates steady" in user
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +281,7 @@ class TestSeedSingle:
         from pipeline.knowledge.profile_seeder import _seed_single, _build_ticker_messages
 
         run_id = _seed_run_log(seeded_db)
-        messages = _build_ticker_messages("AAPL", "Apple Inc.", "Information Technology")
+        messages = _build_ticker_messages(_minimal_ticker_pack("AAPL"))
 
         with patch(
             "pipeline.knowledge.profile_seeder._generate_profile",
@@ -352,6 +449,12 @@ class TestSeedMissingProfiles:
         run_id = _seed_run_log(seeded_db)
 
         with patch(
+            "pipeline.knowledge.profile_seeder.fetch_ticker_fact_pack",
+            AsyncMock(side_effect=lambda conn, t, n, s: _minimal_ticker_pack(t)),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.fetch_macro_fact_pack",
+            AsyncMock(return_value=_minimal_macro_pack()),
+        ), patch(
             "pipeline.knowledge.profile_seeder.extract_from_markdown",
             AsyncMock(return_value=CANNED_EXTRACTION),
         ):
@@ -373,6 +476,12 @@ class TestSeedMissingProfiles:
         run_id = _seed_run_log(seeded_db)
 
         with patch(
+            "pipeline.knowledge.profile_seeder.fetch_ticker_fact_pack",
+            AsyncMock(side_effect=lambda conn, t, n, s: _minimal_ticker_pack(t)),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.fetch_macro_fact_pack",
+            AsyncMock(return_value=_minimal_macro_pack()),
+        ), patch(
             "pipeline.knowledge.profile_seeder.extract_from_markdown",
             AsyncMock(return_value=CANNED_EXTRACTION),
         ):
@@ -394,6 +503,12 @@ class TestSeedMissingProfiles:
         run_id = _seed_run_log(seeded_db)
 
         with patch(
+            "pipeline.knowledge.profile_seeder.fetch_ticker_fact_pack",
+            AsyncMock(side_effect=lambda conn, t, n, s: _minimal_ticker_pack(t)),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.fetch_macro_fact_pack",
+            AsyncMock(return_value=_minimal_macro_pack()),
+        ), patch(
             "pipeline.knowledge.profile_seeder.extract_from_markdown",
             AsyncMock(return_value=CANNED_EXTRACTION),
         ):
@@ -431,6 +546,12 @@ class TestSeedMissingProfiles:
         client.generate = flaky_generate
 
         with patch(
+            "pipeline.knowledge.profile_seeder.fetch_ticker_fact_pack",
+            AsyncMock(side_effect=lambda conn, t, n, s: _minimal_ticker_pack(t)),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.fetch_macro_fact_pack",
+            AsyncMock(return_value=_minimal_macro_pack()),
+        ), patch(
             "pipeline.knowledge.profile_seeder.extract_from_markdown",
             AsyncMock(return_value=CANNED_EXTRACTION),
         ):
@@ -452,3 +573,67 @@ class TestSeedMissingProfiles:
         assert result.tickers_seeded == []
         assert result.macro_seeded is False
         mock_cloud_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_grounding_failure_does_not_skip_ticker(self, seeded_db, mock_rag, mock_cloud_client):
+        """If yfinance grounding fails, the seeder still attempts the profile with a minimal pack."""
+        from pipeline.knowledge.profile_seeder import seed_missing_profiles
+        from pipeline.knowledge.profile_grounding import TickerFactPack
+
+        run_id = _seed_run_log(seeded_db)
+        failed_pack = TickerFactPack(
+            ticker="AAPL",
+            company_name="Apple Inc.",
+            sector="Information Technology",
+            grounding_available=False,
+        )
+
+        with patch(
+            "pipeline.knowledge.profile_seeder.fetch_ticker_fact_pack",
+            AsyncMock(return_value=failed_pack),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.fetch_macro_fact_pack",
+            AsyncMock(return_value=_minimal_macro_pack()),
+        ), patch(
+            "pipeline.knowledge.profile_seeder.extract_from_markdown",
+            AsyncMock(return_value=CANNED_EXTRACTION),
+        ):
+            result = await seed_missing_profiles(seeded_db, mock_rag, mock_cloud_client, run_id)
+
+        # Seeding proceeds despite grounding failure — cloud LLM is still called
+        assert mock_cloud_client.generate.call_count > 0
+
+
+# ---------------------------------------------------------------------------
+# create_seeding_client fallback tests
+# ---------------------------------------------------------------------------
+
+class TestCreateSeedingClient:
+    def test_returns_ollama_when_no_gemini_key(self):
+        from pipeline.agents.cloud_client import create_seeding_client, OllamaClient
+
+        with patch("pipeline.agents.cloud_client.GEMINI_API_KEY", None), \
+             patch("pipeline.agents.cloud_client.SEEDING_LLM_PROVIDER", "auto",
+                   create=True):
+            # Need to re-import config binding
+            import pipeline.agents.cloud_client as cc_mod
+            original = cc_mod.GEMINI_API_KEY
+            cc_mod.GEMINI_API_KEY = None
+            try:
+                client = create_seeding_client()
+                assert isinstance(client, OllamaClient)
+            finally:
+                cc_mod.GEMINI_API_KEY = original
+
+    def test_explicit_ollama_provider_returns_ollama(self):
+        from pipeline.agents.cloud_client import OllamaClient
+        import pipeline.config as cfg_mod
+
+        original = cfg_mod.SEEDING_LLM_PROVIDER
+        cfg_mod.SEEDING_LLM_PROVIDER = "ollama"
+        try:
+            from pipeline.agents.cloud_client import create_seeding_client
+            client = create_seeding_client()
+            assert isinstance(client, OllamaClient)
+        finally:
+            cfg_mod.SEEDING_LLM_PROVIDER = original

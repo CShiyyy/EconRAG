@@ -12,8 +12,8 @@
 - **Agent Orchestration:** LangGraph.
 - **Knowledge Graph:** LightRAG (NanoVectorDB + NetworkX).
 
-**Implementation Status (as of 2026-04-07):**
-Phases 1–7 of the build plan are complete and committed. Phase 8 (FastAPI backend) and Phase 9 (React frontend) are in progress with uncommitted code. Scheduler (`APScheduler`) and notification webhooks (`Discord/Telegram`) are not yet implemented. The LangGraph orchestration (§3, §6) is implemented as three subgraphs (`data_graph`, `reasoning_graph`, `execution_graph`) composed by a parent graph, rather than the single flat graph described in this document. A shared `pipeline/config.py` module centralizes paths, API keys, and model settings.
+**Implementation Status (as of 2026-04-16):**
+Phases 1–9 are complete and committed. Phase 8 (FastAPI backend) and Phase 9 (React frontend) are implemented. The Improve-initialization branch adds profile seeding (§1.1), admin reset, and an OllamaClient for the seeder. Scheduler (`APScheduler`) and notification webhooks (`Discord/Telegram`) are not yet implemented. The LangGraph orchestration (§3, §6) is implemented as three subgraphs (`data_graph`, `reasoning_graph`, `execution_graph`) composed by a parent graph, rather than the single flat graph described in this document. A shared `pipeline/config.py` module centralizes paths, API keys, and model settings.
 
 **Ticker Universe:** The user selects a pre-defined index universe at initialization (S&P 500, Nasdaq 100, or Dow Jones 30). The system pulls the constituent ticker list from a public source (e.g., Wikipedia tables) and uses this as the tracked universe for ingestion, extraction, and Agent A queries. The universe can be changed via the UI; changes take effect on the next run.
 
@@ -39,6 +39,26 @@ Each source has an independent health check. Per-run status (success, timeout, r
 3. **Canonical Registry** resolves raw entity strings to canonical IDs before graph insertion (e.g., "NVIDIA," "Nvidia Corp," "Jensen's company" → `NVDA`). See §2.2.
 4. **Post-Extraction Validator** discards or remaps any entity types or relationship types the LLM produced outside the closed ontology.
 5. Validated, canonicalized entities and edges are inserted into LightRAG's graph.
+
+### 1.1 Profile Seeding (Initialization Bootstrap)
+
+Before the first ingest runs, Agent A would query an empty LightRAG graph and produce no useful output. The profile seeder solves this cold-start problem by generating structured baseline profiles at initialization time.
+
+**Flow (per run, idempotent):**
+1. `seed_profiles_node` runs as the first node of the data subgraph.
+2. SQL check: which watchlist tickers are missing from `kg_seed_log`? Which profiles already exist are skipped.
+3. For each pending ticker: `fetch_ticker_fact_pack()` calls yfinance concurrently (company info + news headlines). Produces a `TickerFactPack` with sector, industry, CEO, market cap, P/E, 52-week range, business summary, peer tickers, and recent headlines. Falls back to minimal structural pack if yfinance is unavailable.
+4. Cloud LLM (Gemini or Ollama, per `SEEDING_LLM_PROVIDER`) generates a grounded markdown profile using the fact pack. Strict prompt instructions prevent hallucination of financials not in the fact pack.
+5. The markdown is run through the standard extract→validate→insert pipeline (same as normal ingestion). Tier 2 edges from seeding receive an extended TTL (`PROFILE_SEED_TTL_HOURS`, default 720 hours / 30 days) to survive routine pruning cycles.
+6. `kg_seed_log` row is written (only on full success), making the operation idempotent.
+7. Macro profile: `fetch_macro_fact_pack()` fetches 10Y and 3M Treasury yields, VIX, DXY, SPY, QQQ levels and macro-relevant news headlines. Cloud LLM generates a macro environment snapshot using these facts.
+8. Ticker profiles run with bounded concurrency (`PROFILE_SEED_CONCURRENCY`, default 3). Macro profile runs sequentially after tickers.
+
+**Configuration:**
+- `PROFILE_SEED_ENABLED` (default: true) — set to false to disable seeding entirely.
+- `PROFILE_SEED_TTL_HOURS` (default: 720) — how long seeded Tier 2 edges persist before pruning.
+- `PROFILE_SEED_CONCURRENCY` (default: 3) — max concurrent ticker profile generations.
+- `SEEDING_LLM_PROVIDER` (default: "auto") — "auto" uses Gemini if `GEMINI_API_KEY` is set, else Ollama. "gemini" or "ollama" force the choice.
 
 ---
 
@@ -106,6 +126,13 @@ The database is the system's single source of truth. Use `PRAGMA journal_mode=WA
 - `standing_id` (PK), `canonical_id` (FK to `canonical_entities`), `status` (active / resolved), `category` (geopolitical / monetary_policy / regulatory / trade_policy / sector_crisis / other), `summary` (text — compressed context, periodically refreshed), `affected_tickers` (JSON array of ticker symbols this standing event is relevant to), `promoted_at` (timestamp), `promotion_source` (auto / manual / agent_c), `last_reinforced` (timestamp — most recent run where ingested content referenced this event), `reinforcement_count` (INTEGER — total number of runs that have referenced this event), `stale_run_threshold` (INTEGER, default 28 — number of consecutive runs with zero references before flagging for review), `resolved_at` (timestamp, nullable), `created_from_run_id` (FK to `run_log`).
 - Active standing events are **never pruned** from the LightRAG graph. Their associated nodes and edges persist regardless of the ephemeral TTL logic.
 - When resolved, the graph nodes are not deleted but are marked `status: resolved` and excluded from Agent A's active query set.
+
+**`kg_seed_log`** — Idempotency log for LightRAG profile seeding. Tracks which ticker and macro profiles have been seeded into LightRAG at initialization.
+- `seed_type` + `seed_key` (PK composite), `seeded_at` (timestamp), `run_id` (FK to `run_log`, nullable), `source_id` (text, e.g. `"profile:NVDA"`), `seed_text` (text — the full markdown profile generated by the LLM, for audit/display).
+- Written by the profile seeder after successful extract→validate→insert. Never overwritten except via `INSERT OR REPLACE` (reseed).
+- Exposed by `GET /api/profiles` and `GET /api/profiles/{key}`.
+
+**Total: 13 tables** (`account`, `watchlist`, `constraints`, `holdings`, `computed_targets`, `snapshots`, `recommendations`, `trades`, `run_log`, `agent_outputs`, `canonical_entities`, `standing_events`, `kg_seed_log`).
 
 ### 2.2 Qualitative Store — LightRAG (Local)
 
@@ -234,7 +261,7 @@ Graph nodes and edges are managed according to three persistence tiers, replacin
 *Framework: **LangGraph** (Stateful Multi-Agent Workflow with conditional edges).*
 
 **Implementation note:** The orchestration is split into three LangGraph subgraphs composed by a parent graph (`pipeline/orchestration/graph.py`):
-- **Data subgraph** (`data_graph.py`): snapshot → ingest → extract & resolve → embed & prune → standing maintenance
+- **Data subgraph** (`data_graph.py`): seed_profiles → snapshot → ingest → extract & resolve → embed & prune → standing maintenance (seed_profiles runs first so LightRAG has baseline context before ingestion; it is idempotent — near-no-op after init)
 - **Reasoning subgraph** (`reasoning_graph.py`): agent A → agent B → re-query check → agent C (assessment or decision)
 - **Execution subgraph** (`execution_graph.py`): standing actions → position sizing → trade execution → logging → notification
 
@@ -402,6 +429,12 @@ On re-query, Agent A re-runs with a **targeted query** (specific ticker + expand
 - `quant_support` and `signal_agreement` are `"n/a"` on the first run (no Agent B data).
 - Output is stored to `recommendations` table *before* the Position Sizing Engine runs (pre-open) or as the final step (post-close).
 
+**Cloud LLM Client Implementations:**
+- `GeminiClient` — Gemini 1.5 Pro via google.genai SDK. Used for Agent C in production mode.
+- `OllamaClient` — Local Ollama endpoint. Used as Agent C fallback (`CLOUD_PROVIDER=ollama`) and as the default seeding LLM when `SEEDING_LLM_PROVIDER=ollama` or when no Gemini key is present.
+- `create_cloud_client()` — factory for Agent C client (respects `CLOUD_PROVIDER` env).
+- `create_seeding_client()` — factory for profile seeder client (respects `SEEDING_LLM_PROVIDER`: auto/gemini/ollama).
+
 ### 4.1 Position Sizing Engine (Deterministic)
 
 A pure Python module that sits between Agent C's output and trade execution. **No LLM involvement.** Takes Agent C's per-ticker conviction sub-scores and translates them into concrete share counts.
@@ -536,7 +569,7 @@ The two daily runs serve fundamentally different roles:
 
 **Mode:** Simulation only. No live broker integration. UI is designed as if real to support future transition.
 
-**Implementation status:** FastAPI backend (`backend/`) and React frontend (`frontend/`) are in progress with uncommitted code. Backend routers cover init, portfolio, recommendations, runs, standing events, constraints, and watchlist. Frontend has pages for all core views (Dashboard, Recommendations, Runs, Run Detail, P&L, Standing Events, Constraints, Init) with shared components and API client modules.
+**Implementation status:** FastAPI backend (`backend/`) and React frontend (`frontend/`) are committed (phases 8 and 9 complete). Backend routers cover init, portfolio, recommendations, runs, standing events, constraints, watchlist, profiles (`profiles.py` — GET /api/profiles, GET /api/profiles/{key}), and admin (`admin.py` — POST /api/admin/reset, requires `{"confirm": true}`). Frontend has pages for all core views (Dashboard, Recommendations, Runs, Run Detail, P&L, Standing Events, Constraints, Init) with shared components and API client modules.
 
 ### Initialization Flow
 - **First-time setup screen:** User selects a ticker universe (S&P 500 / Nasdaq 100 / Dow Jones 30), enters starting cash amount (required), and optionally adjusts constraint defaults (`cash_floor`, `max_single_position`, `max_sector_concentration`, `min_position_size`).

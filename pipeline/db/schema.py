@@ -153,6 +153,7 @@ TABLES_SQL: list[str] = [
         seeded_at  TEXT NOT NULL,
         run_id     INTEGER REFERENCES run_log(run_id),
         source_id  TEXT NOT NULL,
+        seed_text  TEXT,
         PRIMARY KEY (seed_type, seed_key)
     )
     """,
@@ -174,3 +175,19 @@ def create_tables(conn: sqlite3.Connection) -> None:
     for ddl in TABLES_SQL:
         conn.execute(ddl)
     conn.commit()
+
+
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply incremental schema migrations for existing databases.
+
+    Safe to call on any database version — already-present columns are silently skipped.
+    """
+    migrations = [
+        "ALTER TABLE kg_seed_log ADD COLUMN seed_text TEXT",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists

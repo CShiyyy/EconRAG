@@ -8,6 +8,7 @@ from backend.routers import (
     constraints,
     init,
     portfolio,
+    profiles,
     recommendations,
     runs,
     standing_events,
@@ -31,10 +32,11 @@ app.include_router(runs.router, prefix="/api")
 app.include_router(standing_events.router, prefix="/api")
 app.include_router(constraints.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
+app.include_router(profiles.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=5000, reload=True)

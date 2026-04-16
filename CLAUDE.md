@@ -22,7 +22,7 @@ Autonomous Portfolio Monitoring Agent — a multi-agent system for US equities s
 ## Project Structure
 
 ```
-backend/                    # FastAPI app (Phase 8 — in progress, uncommitted)
+backend/                    # FastAPI app (Phase 8)
   main.py                   # FastAPI app setup with CORS
   deps.py                   # Database session dependency
   schemas.py                # Pydantic response models
@@ -34,12 +34,15 @@ backend/                    # FastAPI app (Phase 8 — in progress, uncommitted)
     standing_events.py      # CRUD for standing events
     constraints.py          # GET/PATCH /api/constraints
     watchlist.py            # GET /api/watchlist, POST /api/watchlist/refresh
+    profiles.py             # GET /api/profiles, GET /api/profiles/{key}
+    admin.py                # POST /api/admin/reset
 pipeline/
   config.py                 # Shared config (paths, API keys, model settings)
   db/
     connection.py           # SQLite connection with WAL mode
-    schema.py               # All 12 table definitions
+    schema.py               # All 13 table definitions (includes kg_seed_log)
     init.py                 # Initialization flow (account, watchlist, constraints, canonical entities)
+    reset.py                # hard_reset() — deletes DB + WAL sidecars + LightRAG storage
     helpers.py              # Query helpers (portfolio value, derived weights, first-run check)
   scrapers/
     watchlist.py            # Wikipedia scraper for index constituents (SP500/Nasdaq100/Dow30)
@@ -59,6 +62,8 @@ pipeline/
     graph_ops.py            # Graph insertion, query, correlation edge injection
     extraction.py           # Extraction orchestrator with Ollama LLM calls
     pruner.py               # Ephemeral TTL pruner with tier immunity
+    profile_grounding.py    # yfinance fact packs (TickerFactPack, MacroFactPack) for seeder
+    profile_seeder.py       # Cloud LLM profile generation → extract → validate → insert into LightRAG
   agents/
     agent_a.py              # Local LLM context retriever (Gemma 4 E4B via Ollama)
     agent_b.py              # Deterministic quant script (drift, volatility, health scores)
@@ -72,14 +77,14 @@ pipeline/
   orchestration/
     state.py                # PipelineState TypedDict
     graph.py                # Parent LangGraph graph and pipeline entry point
-    data_graph.py           # Data pipeline LangGraph subgraph
+    data_graph.py           # Data pipeline LangGraph subgraph (seed_profiles → ingest → extract → embed → standing)
     reasoning_graph.py      # Agent reasoning LangGraph subgraph
     execution_graph.py      # Execution LangGraph subgraph
     conditions.py           # Re-query evaluator, run-type branching
     executor.py             # Simulated trade execution and cost basis
     snapshots.py            # Portfolio snapshot recording
     standing.py             # Standing event action processing
-frontend/                   # React SPA (Phase 9 — in progress, uncommitted)
+frontend/                   # React SPA (Phase 9)
   src/
     App.jsx                 # Routing setup
     main.jsx                # Entry point
@@ -104,8 +109,9 @@ docs/
 | 5 | Agent A & Agent B | Complete | phase3-data-ingestion |
 | 6 | Agent C (Cloud LLM) | Complete | phase3-data-ingestion |
 | 7 | LangGraph Orchestration | Complete | phase3-data-ingestion |
-| 8 | FastAPI Backend | In progress (uncommitted) | phase3-data-ingestion |
-| 9 | React Frontend | In progress (uncommitted) | phase3-data-ingestion |
+| 8 | FastAPI Backend | Complete | phase3-data-ingestion |
+| 9 | React Frontend | Complete | phase3-data-ingestion |
+| 10 | Profile Seeding & Admin Reset | In progress | Improve-initialization |
 
 Design specs for each phase are in `docs/specs/`.
 
@@ -123,6 +129,7 @@ Read `ARCHITECTURE.md` for the full system design (ontology, schemas, agent outp
 - **Three-tier graph persistence:** Structural (never pruned), Ephemeral (TTL + significance decay), Standing (persistent until resolved)
 - **Canonical Entity Registry:** Maps raw extracted strings to canonical IDs (e.g., "Nvidia Corp" -> `NVDA`). 8 entity types, 12 active relationship types in a closed ontology
 - **Standing events:** Persistent macro conditions with auto-promotion (6+ runs over 3+ days), manual pinning, or Agent C recommendation. Staleness detection at 28 consecutive unreferenced runs
+- **Profile Seeding:** At initialization and on subsequent runs, a cloud LLM (or Ollama fallback) generates per-ticker and macro markdown profiles grounded in live yfinance fact packs. These are extracted into LightRAG so Agent A has non-empty context on the first pipeline run. Tracked in `kg_seed_log`; idempotent.
 
 ## Development Guidelines
 
