@@ -85,7 +85,7 @@ def _insert_run_log(conn, run_type="pre_open"):
 
 
 # ---------------------------------------------------------------------------
-# Test: Conviction Mapping — all 27 combinations
+# Test: Narrative Multiplier
 # ---------------------------------------------------------------------------
 
 class TestNarrativeMultiplier:
