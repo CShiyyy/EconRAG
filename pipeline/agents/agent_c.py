@@ -1,9 +1,7 @@
 """Agent C — Cloud LLM Portfolio Synthesizer.
 
-Operates in three modes:
-  - Assessment (post-close): conviction scores only, no trade actions.
-  - Decision (pre-open): trade actions + conviction scores.
-  - First-run: initial position recommendations from cash.
+Operates in decision mode: produces per-ticker narrative_score (0-10) which
+the sizing engine uses as a multiplier on Agent B's quantitative weights.
 """
 
 from __future__ import annotations
@@ -34,8 +32,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_ACTIONS = {"Hold", "Buy", "Trim", "Exit", "assessment"}
-VALID_CONVICTION = {"very_strong", "strong", "moderate", "weak", "very_weak"}
-VALID_CONVICTION_NA = {"very_strong", "strong", "moderate", "weak", "very_weak", "n/a"}
 VALID_CATEGORIES = {
     "geopolitical", "monetary_policy", "regulatory",
     "trade_policy", "sector_crisis", "other",
@@ -108,6 +104,22 @@ def _format_agent_b_context(agent_b_output: dict) -> str:
     return "\n".join(parts)
 
 
+def _format_agent_b_weights_context(agent_b_output: dict) -> str:
+    """Format Agent B target weights for the unified prompt."""
+    per_ticker = (agent_b_output or {}).get("per_ticker", {})
+    if not per_ticker:
+        return "QUANTITATIVE WEIGHTS: No data available."
+    lines = ["QUANTITATIVE OPTIMIZER TARGET WEIGHTS (Second Tower multi-factor):"]
+    for ticker, data in sorted(per_ticker.items()):
+        tw = data.get("target_weight", 0.0)
+        vol = data.get("volatility_30d", 0.0)
+        health = data.get("health_score", "")
+        lines.append(
+            f"  {ticker}: target_weight={tw:.4f}, vol_30d={vol:.4f}, health={health}"
+        )
+    return "\n".join(lines)
+
+
 def _format_holdings_context(holdings: list[dict], weights: dict[str, float]) -> str:
     """Format current holdings into context."""
     if not holdings:
@@ -151,317 +163,118 @@ def _format_source_health(source_health: list[dict]) -> str:
     return "\n".join(lines)
 
 
-_ASSESSMENT_SYSTEM = """\
-You are the lead portfolio manager performing an end-of-day assessment. \
-Evaluate the portfolio state against the full day's data.
+_SYSTEM = """\
+You are a narrative moderator for a quantitative portfolio manager. \
+A Second Tower mean-variance optimizer (Agent B) has already computed target weights \
+for each ticker based on multi-factor signals (momentum, value, quality, risk). \
+Your job is to moderate those weights using qualitative narrative evidence from Agent A.
 
-Produce ONLY valid JSON matching this exact schema:
+For each ticker produce a JSON entry with:
+  - narrative_score: float 0–10 (see scale below)
+  - action: "Buy" | "Hold" | "Trim" | "Exit" (for display only — does not affect weights)
+  - rationale: 7–10 sentences citing Agent A narrative evidence for this ticker, \
+comparing its narrative to peers in the watchlist, referencing Agent B's target_weight, \
+and assessing the primary risk to the thesis
+  - key_risk_factors: list of 2–3 specific risks
+
+NARRATIVE SCORE SCALE:
+  8–10 → multiplier 1.30–1.50× — strong positive: clear bullish catalysts, high confidence
+  6–7  → multiplier 1.10–1.20× — mild positive: net positive, mixed or thin evidence
+  5    → multiplier 1.00×       — neutral: no directional signal, Agent B weight unchanged
+  3–4  → multiplier 0.80–0.90× — mild negative: headwinds or deteriorating narrative
+  0–2  → multiplier 0.50–0.70× — strong negative: clear bearish catalysts
+
+RULES:
+- You MUST produce a per_ticker entry for EVERY ticker in the WATCHLIST plus every ticker \
+in CURRENT HOLDINGS.
+- Use ONLY the exact ticker symbols provided. Do NOT invent tickers.
+- Use the FULL 0–10 range to differentiate tickers. Do NOT cluster all scores near 5.
+- A ticker with Agent B target_weight=0 will receive zero allocation regardless of score; \
+still score it honestly for the record.
+- "Trim" and "Exit" are valid ONLY for tickers that appear in CURRENT HOLDINGS.
+- Never emit "Trim" or "Exit" for a ticker not in CURRENT HOLDINGS.
+- standing_event_actions is optional — omit or leave arrays empty if none warranted.
+- Respond with ONLY valid JSON, no additional text, no markdown fences.
+
+OUTPUT SCHEMA:
 {
   "per_ticker": {
     "TICKER": {
-      "action": "assessment",
-      "conviction": {
-        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
-        "narrative_confidence": 7.5,
-        "quant_support": "very_strong | strong | moderate | weak | very_weak",
-        "quant_confidence": 6.0,
-        "signal_agreement": "very_strong | strong | moderate | weak | very_weak",
-        "signal_confidence": 5.0
-      },
-      "rationale": "3-5 sentences: summarise the day's narrative evidence, reference the key quant metrics (drift, volatility, health), and state your risk/reward view.",
-      "key_risk_factors": ["risk1", "risk2"],
-      "notable_change": "Description of significant changes or null"
-    }
-  },
-  "standing_event_actions": {
-    "promote_to_standing": [],
-    "recommend_resolution": []
-  }
-}
-
-Rules:
-- Every held ticker MUST have an entry with action "assessment".
-- You MUST produce a per_ticker entry for Every ticker held in CURRENT HOLDINGS. Do not omit any held ticker.
-- Do NOT include tickers not listed in CURRENT HOLDINGS. Use ONLY the exact ticker symbols provided.
-- conviction sub-scores must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range — not every ticker is "moderate".
-- confidence scores are floats 0.0–10.0. Use 5.0 when uncertain, higher when evidence is clear, lower when conflicting.
-- Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
-- standing_event_actions is optional — omit or leave arrays empty if no actions warranted.
-- Respond with ONLY valid JSON, no additional text.
-
-EXAMPLE OUTPUT (2 tickers shown — follow this style for all tickers):
-{
-  "per_ticker": {
-    "MSFT": {
-      "action": "assessment",
-      "conviction": {
-        "narrative_alignment": "strong",
-        "narrative_confidence": 7.5,
-        "quant_support": "strong",
-        "quant_confidence": 8.0,
-        "signal_agreement": "moderate",
-        "signal_confidence": 5.5
-      },
-      "rationale": "MSFT closed up 1.8% on strong Azure revenue commentary from analyst day. Drift is +0.3% within tolerance and 30-day volatility is low at 18%. Quant health is normal with no flags. Sentiment from financial media is broadly positive, though a few outlets note near-term valuation stretch. Risk/reward favours holding into next earnings.",
-      "key_risk_factors": ["valuation premium vs peers", "enterprise spending slowdown risk"],
-      "notable_change": "Analyst day commentary drove above-average volume"
-    },
-    "BA": {
-      "action": "assessment",
-      "conviction": {
-        "narrative_alignment": "weak",
-        "narrative_confidence": 3.0,
-        "quant_support": "weak",
-        "quant_confidence": 2.5,
-        "signal_agreement": "very_weak",
-        "signal_confidence": 2.0
-      },
-      "rationale": "BA fell 3.1% on renewed reports of 737 MAX production delays. Drift has breached the warning threshold at -1.2% and 30-day volatility is elevated at 34%. Sentiment across news and social is bearish with no bullish counterbalance. The position is approaching trim territory pending tomorrow's pre-open read.",
-      "key_risk_factors": ["737 MAX production halt risk", "FAA regulatory action", "balance sheet stress from cash burn"],
-      "notable_change": "Drift breach flag triggered; volatility above warning threshold"
-    }
-  }
-}"""
-
-
-_DECISION_SYSTEM = """\
-You are the lead portfolio manager making pre-open trading decisions. \
-Cross-reference the sentiment analysis against quantitative metrics and the \
-overnight assessment to produce concrete trade recommendations.
-
-Produce ONLY valid JSON matching this exact schema:
-{
-  "per_ticker": {
-    "TICKER": {
+      "narrative_score": 7.5,
       "action": "Buy | Hold | Trim | Exit",
-      "conviction": {
-        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
-        "narrative_confidence": 7.5,
-        "quant_support": "very_strong | strong | moderate | weak | very_weak",
-        "quant_confidence": 6.0,
-        "signal_agreement": "very_strong | strong | moderate | weak | very_weak",
-        "signal_confidence": 5.0
-      },
-      "rationale": "3-5 sentences: state your action reasoning, cite specific narrative evidence from Agent A, reference the quant metrics (drift, volatility, health) from Agent B, and assess the key risk.",
+      "rationale": "7-10 sentences...",
       "key_risk_factors": ["risk1", "risk2"]
     }
   },
   "standing_event_actions": {
     "promote_to_standing": [
-      {
-        "canonical_id": "event_name",
-        "category": "geopolitical | monetary_policy | regulatory | trade_policy | sector_crisis | other",
-        "summary": "Description of the condition",
-        "affected_tickers": ["TICKER1"]
-      }
+      {"canonical_id": "...", "category": "...", "summary": "...", "affected_tickers": [...]}
     ],
     "recommend_resolution": [
-      {
-        "standing_id": 123,
-        "reason": "Why this standing event should be resolved"
-      }
+      {"standing_id": 123, "reason": "..."}
     ]
   }
 }
 
-Rules:
-- Every held ticker and any new Buy recommendations MUST have an entry.
-- You MUST produce a per_ticker entry for Every ticker held in CURRENT HOLDINGS, plus any new tickers recommended for purchase. Do not omit any held ticker or newly recommended buy.
-- Do NOT include tickers not listed in CURRENT HOLDINGS. Use ONLY the exact ticker symbols provided.
-- Use action="Buy" for tickers with positive evidence, action="Hold" for tickers with insufficient or degraded evidence, action="Trim" for tickers with negative evidence and action="Exit" for tickers with highly negative evidence.
-- Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
-- conviction sub-scores must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range — not every ticker is "moderate".
-- confidence scores are floats 0.0–10.0. Use 5.0 when uncertain, higher when evidence is clear, lower when conflicting.
-- standing_event_actions is optional — omit or leave arrays empty if no actions warranted.
-- Respond with ONLY valid JSON, no additional text.
-
-EXAMPLE OUTPUT (2 tickers shown — follow this style for all tickers):
+EXAMPLE (2 tickers):
 {
   "per_ticker": {
     "NVDA": {
+      "narrative_score": 8.5,
       "action": "Buy",
-      "conviction": {
-        "narrative_alignment": "very_strong",
-        "narrative_confidence": 9.0,
-        "quant_support": "strong",
-        "quant_confidence": 7.5,
-        "signal_agreement": "strong",
-        "signal_confidence": 7.0
-      },
-      "rationale": "NVDA has strong bullish sentiment across news and social following data centre order announcements overnight. Quant metrics are healthy: drift is +0.1%, 30-day volatility is 28% within tolerance, and health score is normal. Signal agreement between narrative and quant is strong. Adding to position is warranted given the clear catalyst and manageable risk profile. Key risk is that AI capex expectations are already partly priced in.",
-      "key_risk_factors": ["AI capex expectations already priced in", "export restriction escalation risk"]
+      "rationale": "NVDA commands the strongest narrative in the watchlist. Agent A highlights accelerating data centre order flow and multiple sell-side upgrades overnight, with high confidence in the bullish read. Compared to other Information Technology names in the watchlist, NVDA has the most specific near-term catalyst. Agent B assigns a 14% target weight reflecting strong multi-factor momentum and quality scores. The narrative reinforces rather than contradicts the quant signal — both point to continued outperformance. Supply chain risk is the primary concern given Taiwan concentration. Export restriction escalation remains a tail risk but is not the current consensus expectation. Overall the combined evidence strongly supports increasing exposure.",
+      "key_risk_factors": ["export restriction escalation", "Taiwan supply chain concentration"]
     },
-    "WBA": {
-      "action": "Trim",
-      "conviction": {
-        "narrative_alignment": "very_weak",
-        "narrative_confidence": 2.0,
-        "quant_support": "weak",
-        "quant_confidence": 3.0,
-        "signal_agreement": "weak",
-        "signal_confidence": 3.5
-      },
-      "rationale": "WBA sentiment is broadly negative following store closure announcements and a dividend cut rumour in overnight news. Quant shows a drift breach of -1.8% and elevated volatility of 41%. Both narrative and quant signals agree on deterioration. Trimming to reduce exposure while preserving optionality on any turnaround. Main risk is further downside if the dividend cut is confirmed.",
-      "key_risk_factors": ["dividend cut confirmation risk", "store closure cash costs", "consumer spending weakness"]
-    }
-  }
-}"""
-
-
-_FIRST_RUN_SYSTEM = """\
-You are the lead portfolio manager selecting initial positions for a new portfolio. \
-The portfolio is currently 100% cash. Evaluate the watchlist tickers based on \
-narrative analysis and recommend initial positions.
-
-Produce ONLY valid JSON matching this exact schema:
-{
-  "per_ticker": {
-    "TICKER": {
-      "action": "Buy | Hold",
-      "conviction": {
-        "narrative_alignment": "very_strong | strong | moderate | weak | very_weak",
-        "narrative_confidence": 7.5,
-        "quant_support": "n/a",
-        "quant_confidence": 0.0,
-        "signal_agreement": "n/a",
-        "signal_confidence": 0.0
-      },
-      "rationale": "3-5 sentences: cite specific narrative evidence for this ticker, compare its outlook relative to peers, and state the primary risk to the thesis.",
-      "key_risk_factors": ["risk1", "risk2"]
-    }
-  }
-}
-
-Rules:
-- You MUST produce a per_ticker entry for EVERY ticker listed in the WATCHLIST section. Do not omit any ticker.
-- Do NOT include any tickers that are not in the WATCHLIST. Use ONLY the exact ticker symbols provided.
-- Use action="Buy" for tickers with positive evidence, action="Hold" for tickers with insufficient or degraded evidence.
-- Even when sentiment data is thin or degraded, produce your best assessment — never return an empty per_ticker.
-- narrative_alignment must be one of: "very_strong", "strong", "moderate", "weak", "very_weak". Use the FULL range to differentiate tickers — not all tickers are equally attractive.
-- narrative_confidence is a float 0.0–10.0 reflecting how certain you are in the narrative score. Use the full range.
-- quant_support and signal_agreement MUST be "n/a" with confidence 0.0 (no quantitative data on first run).
-- No standing_event_actions on first run.
-- Respond with ONLY valid JSON, no additional text.
-
-EXAMPLE OUTPUT (3 tickers shown — follow this style for all watchlist tickers):
-{
-  "per_ticker": {
-    "AAPL": {
-      "action": "Buy",
-      "conviction": {
-        "narrative_alignment": "strong",
-        "narrative_confidence": 7.5,
-        "quant_support": "n/a",
-        "quant_confidence": 0.0,
-        "signal_agreement": "n/a",
-        "signal_confidence": 0.0
-      },
-      "rationale": "AAPL has positive narrative momentum driven by iPhone upgrade cycle commentary and services revenue growth themes in recent coverage. Compared to its tech peers in the watchlist, it offers a more defensive profile with lower regulatory risk. The seeded profile highlights a strong installed base moat and consistent free cash flow generation. The primary risk is a consumer spending slowdown compressing hardware demand. Overall the narrative supports a Buy with solid confidence.",
-      "key_risk_factors": ["consumer spending slowdown", "China market regulatory pressure"]
-    },
-    "GS": {
-      "action": "Buy",
-      "conviction": {
-        "narrative_alignment": "moderate",
-        "narrative_confidence": 5.5,
-        "quant_support": "n/a",
-        "quant_confidence": 0.0,
-        "signal_agreement": "n/a",
-        "signal_confidence": 0.0
-      },
-      "rationale": "GS narrative is mixed: deal-making activity is recovering per recent headlines but trading revenue faces a tougher comparison period. Among financials in the watchlist, GS ranks in the middle for narrative strength. The profile notes cyclical sensitivity to capital markets activity. Confidence is moderate given the mixed signals. The key risk is a deal pipeline slowdown if rates stay elevated longer.",
-      "key_risk_factors": ["deal pipeline slowdown", "elevated rates compressing IB fees"]
-    },
-    "VZ": {
+    "KO": {
+      "narrative_score": 4.5,
       "action": "Hold",
-      "conviction": {
-        "narrative_alignment": "very_weak",
-        "narrative_confidence": 2.0,
-        "quant_support": "n/a",
-        "quant_confidence": 0.0,
-        "signal_agreement": "n/a",
-        "signal_confidence": 0.0
-      },
-      "rationale": "VZ narrative is weak: coverage focuses on debt load concerns and subscriber loss to competitors. Among the watchlist, VZ ranks near the bottom for narrative momentum. The seeded profile confirms high leverage and limited near-term catalysts. Confidence is low as there is little evidence of a near-term turnaround. Holding rather than buying until clearer positive evidence emerges.",
-      "key_risk_factors": ["debt refinancing risk at higher rates", "subscriber churn acceleration"]
+      "rationale": "KO narrative is mildly negative. Agent A finds limited recent coverage with the most recent theme being volume softness in emerging markets and FX headwinds. Among Consumer Staples names in the watchlist, KO ranks below average on narrative momentum. Agent B assigns a 0% target weight reflecting weak quantitative signals. The narrative is consistent with the quant view — neither provides a reason to initiate. Confidence in the narrative read is moderate given thin coverage. The stock offers defensiveness but no near-term catalyst. A score of 4.5 reflects mild negative narrative without a clear bear thesis.",
+      "key_risk_factors": ["EM volume softness", "FX headwinds on repatriation"]
     }
   }
 }"""
 
-def _build_assessment_prompt(
-    agent_a_output: dict,
-    agent_b_output: dict,
-    source_health: list[dict],
-    holdings: list[dict],
-    weights: dict[str, float],
-    constraints: dict[str, float],
-    standing_events: list[dict],
-) -> list[dict]:
-    """Build messages for assessment mode (post-close)."""
-    user_parts = [
-        _format_agent_a_context(agent_a_output),
-        _format_agent_b_context(agent_b_output),
-        _format_source_health(source_health),
-        _format_holdings_context(holdings, weights),
-        _format_standing_context(standing_events),
-        f"CONSTRAINTS: {json.dumps(constraints)}",
-    ]
-    return [
-        {"role": "system", "content": _ASSESSMENT_SYSTEM},
-        {"role": "user", "content": "\n\n".join(user_parts)},
-    ]
 
-
-def _build_decision_prompt(
+def _build_prompt(
     agent_a_output: dict,
-    agent_b_output: dict,
+    agent_b_output: dict | None,
     source_health: list[dict],
     holdings: list[dict],
     weights: dict[str, float],
     constraints: dict[str, float],
     standing_events: list[dict],
     previous_assessment: dict | None,
-) -> list[dict]:
-    """Build messages for decision mode (pre-open)."""
-    user_parts = [
-        _format_agent_a_context(agent_a_output),
-        _format_agent_b_context(agent_b_output),
-        _format_source_health(source_health),
-        _format_holdings_context(holdings, weights),
-        _format_standing_context(standing_events),
-        f"CONSTRAINTS: {json.dumps(constraints)}",
-    ]
-    if previous_assessment:
-        user_parts.append(
-            f"PREVIOUS POST-CLOSE ASSESSMENT:\n{json.dumps(previous_assessment, indent=2)}"
-        )
-    return [
-        {"role": "system", "content": _DECISION_SYSTEM},
-        {"role": "user", "content": "\n\n".join(user_parts)},
-    ]
-
-
-def _build_first_run_prompt(
-    agent_a_output: dict,
-    source_health: list[dict],
-    constraints: dict[str, float],
     watchlist: list[dict],
 ) -> list[dict]:
-    """Build messages for first-run mode."""
+    """Build messages for the unified decision prompt."""
     tickers_info = "\n".join(
         f"  {w['ticker']}: {w['company_name']} ({w['sector']})"
         for w in watchlist
     )
-    ticker_list = ", ".join(w["ticker"] for w in watchlist)
+    held_tickers = [h["ticker"] for h in holdings]
+    universe = sorted({w["ticker"] for w in watchlist} | set(held_tickers))
+    ticker_list = ", ".join(universe)
+
     user_parts = [
         _format_agent_a_context(agent_a_output),
+        _format_agent_b_weights_context(agent_b_output or {}),
         _format_source_health(source_health),
+        _format_holdings_context(holdings, weights),
+        _format_standing_context(standing_events),
         f"CONSTRAINTS: {json.dumps(constraints)}",
-        f"WATCHLIST (available tickers):\n{tickers_info}",
-        f"REQUIRED: Your per_ticker response MUST contain an entry for each of these tickers: {ticker_list}",
+        f"WATCHLIST (candidate universe):\n{tickers_info}",
+        (
+            "REQUIRED: Your per_ticker response MUST contain an entry for each of "
+            f"these tickers: {ticker_list}. Trim/Exit are valid only for tickers "
+            f"in CURRENT HOLDINGS ({', '.join(held_tickers) if held_tickers else 'none'})."
+        ),
     ]
+    if previous_assessment:
+        user_parts.append(
+            f"PREVIOUS ASSESSMENT:\n{json.dumps(previous_assessment, indent=2)}"
+        )
     return [
-        {"role": "system", "content": _FIRST_RUN_SYSTEM},
+        {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
@@ -504,7 +317,7 @@ def _remap_ticker(ticker: str, known: set[str]) -> str | None:
 def _normalize_response(data: dict, known_tickers: set[str] | None = None) -> dict:
     """Normalize LLM response to fix common casing/type deviations before validation.
 
-    Handles: action casing, conviction value casing, key_risk_factors as string,
+    Handles: action casing, narrative_score coercion, key_risk_factors as string,
     and ticker key remapping (e.g., GOOGL -> GOOG).
     """
     per_ticker = data.get("per_ticker")
@@ -529,31 +342,22 @@ def _normalize_response(data: dict, known_tickers: set[str] | None = None) -> di
         if not isinstance(entry, dict):
             continue
 
-        # Normalize action: title-case trade actions, keep "assessment" lowercase
+        # Normalize action: title-case trade actions
         action = entry.get("action")
         if isinstance(action, str):
             lower = action.lower()
-            if lower == "assessment":
-                entry["action"] = "assessment"
-            elif lower in ("hold", "buy", "trim", "exit"):
+            if lower in ("hold", "buy", "trim", "exit"):
                 entry["action"] = lower.capitalize()
 
-        # Normalize conviction values to lowercase; clamp confidence scores.
-        conviction = entry.get("conviction")
-        if isinstance(conviction, dict):
-            for key in ("narrative_alignment", "quant_support", "signal_agreement"):
-                val = conviction.get(key)
-                if isinstance(val, str):
-                    conviction[key] = val.lower()
-            for conf_key in ("narrative_confidence", "quant_confidence", "signal_confidence"):
-                raw = conviction.get(conf_key)
-                if raw is not None:
-                    try:
-                        conviction[conf_key] = max(0.0, min(10.0, float(raw)))
-                    except (TypeError, ValueError):
-                        conviction[conf_key] = 5.0
-                else:
-                    conviction[conf_key] = 5.0
+        # Coerce narrative_score to float in [0, 10]; default 5.0 (neutral).
+        ns = entry.get("narrative_score")
+        if ns is not None:
+            try:
+                entry["narrative_score"] = max(0.0, min(10.0, float(ns)))
+            except (TypeError, ValueError):
+                entry["narrative_score"] = 5.0
+        else:
+            entry["narrative_score"] = 5.0
 
         # Coerce key_risk_factors from string to list
         krf = entry.get("key_risk_factors")
@@ -567,10 +371,7 @@ def _validate_per_ticker(
     per_ticker: dict,
     mode: str,
 ) -> tuple[bool, str]:
-    """Validate the per_ticker section of Agent C output.
-
-    Returns (is_valid, error_message). error_message is empty string on success.
-    """
+    """Validate the per_ticker section of Agent C output."""
     if not isinstance(per_ticker, dict) or not per_ticker:
         return False, "per_ticker is missing or empty"
 
@@ -579,34 +380,19 @@ def _validate_per_ticker(
             return False, f"ticker {ticker}: entry is not a dict"
 
         action = entry.get("action")
-        if action not in VALID_ACTIONS:
-            return False, f"ticker {ticker}: action {action!r} not in {VALID_ACTIONS}"
-
-        # Mode-specific action checks
-        if mode == "assessment" and action != "assessment":
-            return False, f"ticker {ticker}: assessment mode requires action='assessment', got {action!r}"
-        if mode in ("decision", "first_run") and action == "assessment":
-            return False, f"ticker {ticker}: {mode} mode cannot use action='assessment'"
-
-        conviction = entry.get("conviction")
-        if not isinstance(conviction, dict):
-            return False, f"ticker {ticker}: conviction is not a dict"
-
-        na = conviction.get("narrative_alignment")
-        if na not in VALID_CONVICTION:
-            return False, f"ticker {ticker}: narrative_alignment {na!r} not in {VALID_CONVICTION}"
-
-        qs = conviction.get("quant_support")
-        sa = conviction.get("signal_agreement")
-
-        if mode == "first_run":
-            if qs != "n/a" or sa != "n/a":
-                return False, f"ticker {ticker}: first_run mode requires quant_support/signal_agreement='n/a', got {qs!r}/{sa!r}"
+        if mode == "assessment":
+            if action != "assessment":
+                return False, f"ticker {ticker}: assessment mode requires action='assessment', got {action!r}"
         else:
-            if qs not in VALID_CONVICTION_NA:
-                return False, f"ticker {ticker}: quant_support {qs!r} not in {VALID_CONVICTION_NA}"
-            if sa not in VALID_CONVICTION_NA:
-                return False, f"ticker {ticker}: signal_agreement {sa!r} not in {VALID_CONVICTION_NA}"
+            if action not in {"Buy", "Hold", "Trim", "Exit"}:
+                return False, f"ticker {ticker}: action {action!r} must be one of Buy/Hold/Trim/Exit"
+
+        if mode != "assessment":
+            ns = entry.get("narrative_score")
+            if ns is None or not isinstance(ns, (int, float)):
+                return False, f"ticker {ticker}: narrative_score missing or not numeric"
+            if not (0.0 <= float(ns) <= 10.0):
+                return False, f"ticker {ticker}: narrative_score {ns} out of range [0, 10]"
 
         if not isinstance(entry.get("rationale"), str) or not entry["rationale"]:
             return False, f"ticker {ticker}: rationale is missing or empty"
@@ -678,21 +464,7 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
     """Produce a safe fallback output when cloud LLM fails."""
     per_ticker = {}
     for ticker in tickers:
-        if mode == "first_run":
-            per_ticker[ticker] = {
-                "action": "Hold",
-                "conviction": {
-                    "narrative_alignment": "weak",
-                    "narrative_confidence": 2.0,
-                    "quant_support": "n/a",
-                    "quant_confidence": 0.0,
-                    "signal_agreement": "n/a",
-                    "signal_confidence": 0.0,
-                },
-                "rationale": "Cloud LLM extraction failed — using degraded output.",
-                "key_risk_factors": [],
-            }
-        elif mode == "assessment":
+        if mode == "assessment":
             per_ticker[ticker] = {
                 "action": "assessment",
                 "conviction": {
@@ -707,17 +479,10 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
                 "key_risk_factors": [],
                 "notable_change": None,
             }
-        else:  # decision
+        else:
             per_ticker[ticker] = {
+                "narrative_score": 5.0,
                 "action": "Hold",
-                "conviction": {
-                    "narrative_alignment": "weak",
-                    "narrative_confidence": 2.0,
-                    "quant_support": "weak",
-                    "quant_confidence": 2.0,
-                    "signal_agreement": "weak",
-                    "signal_confidence": 2.0,
-                },
                 "rationale": "Cloud LLM extraction failed — using degraded output.",
                 "key_risk_factors": [],
             }
@@ -769,40 +534,45 @@ def _sanitize_json_text(raw: str) -> str:
 
 
 def _build_response_schema(known_tickers: set[str], mode: str) -> dict:
-    """Build a JSON Schema that constrains the LLM to produce all required tickers.
-
-    Using schema-constrained generation (Gemini response_schema / Ollama format)
-    prevents the model from returning an empty or missing per_ticker dict.
-    """
+    """Build JSON Schema to constrain LLM output."""
     if mode == "assessment":
-        valid_actions = ["assessment"]
-        conviction_enum = ["strong", "moderate", "weak"]
-    elif mode == "first_run":
-        valid_actions = ["Buy", "Hold"]
-        conviction_enum = ["strong", "moderate", "weak", "n/a"]
-    else:  # decision
-        valid_actions = ["Buy", "Hold", "Trim", "Exit"]
-        conviction_enum = ["strong", "moderate", "weak"]
-
-    entry_schema: dict = {
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": valid_actions},
-            "conviction": {
-                "type": "object",
-                "properties": {
-                    "narrative_alignment": {"type": "string", "enum": conviction_enum},
-                    "quant_support": {"type": "string", "enum": conviction_enum},
-                    "signal_agreement": {"type": "string", "enum": conviction_enum},
+        entry_schema: dict = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["assessment"]},
+                "conviction": {
+                    "type": "object",
+                    "properties": {
+                        "narrative_alignment": {"type": "string"},
+                        "narrative_confidence": {"type": "number", "minimum": 0, "maximum": 10},
+                        "quant_support": {"type": "string"},
+                        "quant_confidence": {"type": "number", "minimum": 0, "maximum": 10},
+                        "signal_agreement": {"type": "string"},
+                        "signal_confidence": {"type": "number", "minimum": 0, "maximum": 10},
+                    },
+                    "required": [
+                        "narrative_alignment", "narrative_confidence",
+                        "quant_support", "quant_confidence",
+                        "signal_agreement", "signal_confidence",
+                    ],
                 },
-                "required": ["narrative_alignment", "quant_support", "signal_agreement"],
+                "rationale": {"type": "string"},
+                "key_risk_factors": {"type": "array", "items": {"type": "string"}},
+                "notable_change": {"type": "string"},
             },
-            "rationale": {"type": "string"},
-            "key_risk_factors": {"type": "array", "items": {"type": "string"}},
-            "notable_change": {"type": "string"},
-        },
-        "required": ["action", "conviction", "rationale", "key_risk_factors"],
-    }
+            "required": ["action", "conviction", "rationale", "key_risk_factors"],
+        }
+    else:
+        entry_schema = {
+            "type": "object",
+            "properties": {
+                "narrative_score": {"type": "number", "minimum": 0, "maximum": 10},
+                "action": {"type": "string", "enum": ["Buy", "Hold", "Trim", "Exit"]},
+                "rationale": {"type": "string"},
+                "key_risk_factors": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["narrative_score", "action", "rationale", "key_risk_factors"],
+        }
 
     sorted_tickers = sorted(known_tickers)
     return {
@@ -899,7 +669,7 @@ async def run_agent_c(
     Args:
         conn: SQLite connection.
         agent_a_output: Agent A's structured JSON output.
-        agent_b_output: Agent B's quant JSON, or None on first run.
+        agent_b_output: Agent B's quant JSON, or None if Second Tower could not produce weights.
         source_health: Per-source ingestion status list.
         run_id: Current pipeline run ID.
         run_type: "pre_open" or "post_close".
@@ -916,41 +686,19 @@ async def run_agent_c(
     constraints = get_constraints(conn)
     standing_events = get_active_standing_events(conn)
 
-    # Determine mode and build prompt
-    if is_first_run:
-        mode = "first_run"
-        watchlist = get_watchlist(conn)
-        tickers = [w["ticker"] for w in watchlist]
-        messages = _build_first_run_prompt(
-            agent_a_output, source_health, constraints, watchlist,
-        )
-    elif run_type == "post_close":
-        mode = "assessment"
-
-        def _price_stub(ticker: str) -> float:
-            # During assessment, we need weights but prices come from market data.
-            # Use a simple query for the latest snapshot prices.
-            return 1.0  # Weights are informational; exact prices not critical here
-
-        holdings = get_holdings(conn)
-        weights = get_derived_weights(conn, price_fn=_price_stub) if holdings else {}
-        # For assessment, weights are best-effort (price stub returns 1.0)
-        tickers = [h["ticker"] for h in holdings] if holdings else []
-        messages = _build_assessment_prompt(
-            agent_a_output, agent_b_output or {}, source_health,
-            holdings, weights, constraints, standing_events,
-        )
-    else:  # pre_open decision
-        mode = "decision"
-        holdings = get_holdings(conn)
-        weights = {}  # Weights need price_fn; will be approximate
-        tickers = [h["ticker"] for h in holdings] if holdings else []
-        previous_assessment = get_previous_assessment(conn)
-        messages = _build_decision_prompt(
-            agent_a_output, agent_b_output or {}, source_health,
-            holdings, weights, constraints, standing_events,
-            previous_assessment,
-        )
+    mode = "decision"
+    holdings = get_holdings(conn)
+    watchlist = get_watchlist(conn)
+    weights: dict[str, float] = {}
+    held_tickers = {h["ticker"] for h in holdings}
+    watchlist_tickers = {w["ticker"] for w in watchlist}
+    tickers = sorted(watchlist_tickers | held_tickers)
+    previous_assessment = get_previous_assessment(conn)
+    messages = _build_prompt(
+        agent_a_output, agent_b_output, source_health,
+        holdings, weights, constraints, standing_events,
+        previous_assessment, watchlist,
+    )
 
     # Call cloud LLM with schema-constrained generation
     known_tickers = set(tickers)
