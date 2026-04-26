@@ -34,8 +34,11 @@ def _valid_assessment_output(tickers=None):
             "action": "assessment",
             "conviction": {
                 "narrative_alignment": "strong",
+                "narrative_confidence": 7.0,
                 "quant_support": "moderate",
+                "quant_confidence": 5.0,
                 "signal_agreement": "strong",
+                "signal_confidence": 6.0,
             },
             "rationale": f"End-of-day assessment for {t}.",
             "key_risk_factors": ["market volatility"],
@@ -48,14 +51,11 @@ def _valid_decision_output(tickers=None):
     tickers = tickers or TICKERS
     per_ticker = {}
     actions = ["Buy", "Hold"]
+    scores = [7.5, 5.0]
     for i, t in enumerate(tickers):
         per_ticker[t] = {
             "action": actions[i % len(actions)],
-            "conviction": {
-                "narrative_alignment": "strong",
-                "quant_support": "moderate",
-                "signal_agreement": "strong",
-            },
+            "narrative_score": scores[i % len(scores)],
             "rationale": f"Decision reasoning for {t}.",
             "key_risk_factors": ["sector risk"],
         }
@@ -63,16 +63,13 @@ def _valid_decision_output(tickers=None):
 
 
 def _valid_first_run_output(tickers=None):
+    """Legacy helper kept for tests that verify first-run is now treated as decision mode."""
     tickers = tickers or TICKERS
     per_ticker = {}
     for t in tickers:
         per_ticker[t] = {
             "action": "Buy",
-            "conviction": {
-                "narrative_alignment": "strong",
-                "quant_support": "n/a",
-                "signal_agreement": "n/a",
-            },
+            "narrative_score": 7.0,
             "rationale": f"Compelling initial position for {t}.",
             "key_risk_factors": ["new position risk"],
         }
@@ -134,6 +131,7 @@ def _agent_b_output():
             "AAPL": {
                 "current_weight": 0.12,
                 "previous_target_weight": 0.10,
+                "target_weight": 0.10,
                 "drift": 0.02,
                 "volatility_30d": 0.25,
                 "sector": "Information Technology",
@@ -143,6 +141,7 @@ def _agent_b_output():
             "NVDA": {
                 "current_weight": 0.15,
                 "previous_target_weight": 0.14,
+                "target_weight": 0.14,
                 "drift": 0.01,
                 "volatility_30d": 0.35,
                 "sector": "Information Technology",
@@ -262,49 +261,58 @@ def _make_mock_client(response_data=None, side_effect=None):
 
 class TestValidation:
     def test_valid_assessment(self):
-        assert _validate_output(_valid_assessment_output(), "assessment") is True
+        valid, err = _validate_output(_valid_assessment_output(), "assessment")
+        assert valid is True, err
 
     def test_valid_decision(self):
-        assert _validate_output(_valid_decision_output(), "decision") is True
-
-    def test_valid_first_run(self):
-        assert _validate_output(_valid_first_run_output(), "first_run") is True
+        valid, err = _validate_output(_valid_decision_output(), "decision")
+        assert valid is True, err
 
     def test_valid_decision_with_standing_actions(self):
-        assert _validate_output(_valid_decision_with_standing_actions(), "decision") is True
+        valid, err = _validate_output(_valid_decision_with_standing_actions(), "decision")
+        assert valid is True, err
 
     def test_assessment_rejects_trade_actions(self):
         output = _valid_decision_output()  # has Buy/Hold actions
-        assert _validate_output(output, "assessment") is False
+        valid, _ = _validate_output(output, "assessment")
+        assert valid is False
 
     def test_decision_rejects_assessment_action(self):
         output = _valid_assessment_output()  # has assessment actions
-        assert _validate_output(output, "decision") is False
+        valid, _ = _validate_output(output, "decision")
+        assert valid is False
 
-    def test_first_run_rejects_non_na_quant(self):
-        output = _valid_decision_output()  # has non-n/a quant_support
-        assert _validate_output(output, "first_run") is False
+    def test_decision_rejects_missing_narrative_score(self):
+        output = _valid_decision_output()
+        del output["per_ticker"]["AAPL"]["narrative_score"]
+        valid, _ = _validate_output(output, "decision")
+        assert valid is False
+
+    def test_decision_rejects_out_of_range_narrative_score(self):
+        output = _valid_decision_output()
+        output["per_ticker"]["AAPL"]["narrative_score"] = 11.0
+        valid, _ = _validate_output(output, "decision")
+        assert valid is False
 
     def test_rejects_invalid_action(self):
         output = _valid_decision_output()
         output["per_ticker"]["AAPL"]["action"] = "InvalidAction"
-        assert _validate_output(output, "decision") is False
-
-    def test_rejects_invalid_conviction(self):
-        output = _valid_assessment_output()
-        output["per_ticker"]["AAPL"]["conviction"]["narrative_alignment"] = "very_strong"
-        assert _validate_output(output, "assessment") is False
+        valid, _ = _validate_output(output, "decision")
+        assert valid is False
 
     def test_rejects_missing_rationale(self):
-        output = _valid_assessment_output()
+        output = _valid_decision_output()
         output["per_ticker"]["AAPL"]["rationale"] = ""
-        assert _validate_output(output, "assessment") is False
+        valid, _ = _validate_output(output, "decision")
+        assert valid is False
 
     def test_rejects_empty_per_ticker(self):
-        assert _validate_output({"per_ticker": {}}, "assessment") is False
+        valid, _ = _validate_output({"per_ticker": {}}, "decision")
+        assert valid is False
 
     def test_rejects_non_dict(self):
-        assert _validate_output("not a dict", "assessment") is False
+        valid, _ = _validate_output("not a dict", "decision")
+        assert valid is False
 
 
 class TestStandingActionValidation:
@@ -320,7 +328,8 @@ class TestStandingActionValidation:
             ],
             "recommend_resolution": [],
         }
-        assert _validate_standing_actions(actions) is True
+        valid, err = _validate_standing_actions(actions)
+        assert valid is True, err
 
     def test_invalid_category(self):
         actions = {
@@ -334,7 +343,8 @@ class TestStandingActionValidation:
             ],
             "recommend_resolution": [],
         }
-        assert _validate_standing_actions(actions) is False
+        valid, _ = _validate_standing_actions(actions)
+        assert valid is False
 
     def test_invalid_resolution_id(self):
         actions = {
@@ -343,7 +353,8 @@ class TestStandingActionValidation:
                 {"standing_id": "not_an_int", "reason": "test"}
             ],
         }
-        assert _validate_standing_actions(actions) is False
+        valid, _ = _validate_standing_actions(actions)
+        assert valid is False
 
 
 class TestDegradedOutput:
@@ -358,26 +369,22 @@ class TestDegradedOutput:
         result = _degraded_output(["AAPL"], "decision")
         entry = result["per_ticker"]["AAPL"]
         assert entry["action"] == "Hold"
-        assert entry["conviction"]["quant_support"] == "weak"
-
-    def test_first_run_degraded(self):
-        result = _degraded_output(["AAPL"], "first_run")
-        entry = result["per_ticker"]["AAPL"]
-        assert entry["action"] == "Hold"
-        assert entry["conviction"]["quant_support"] == "n/a"
-        assert entry["conviction"]["signal_agreement"] == "n/a"
+        assert entry["narrative_score"] == 5.0
+        assert "failed" in entry["rationale"].lower()
 
 
 # ---------------------------------------------------------------------------
 # Integration tests (with mock cloud client)
 # ---------------------------------------------------------------------------
 
-class TestAssessmentMode:
+class TestPostCloseMode:
+    """post_close run_type uses the same unified decision mode as pre_open."""
+
     @pytest.mark.asyncio
-    async def test_assessment_output_structure(self, db_conn):
+    async def test_post_close_output_structure(self, db_conn):
         _seed_full_state(db_conn)
         run_id = _seed_run_log(db_conn, "post_close")
-        output = _valid_assessment_output()
+        output = _valid_decision_output()
         client = _make_mock_client(response_data=output)
 
         result = await run_agent_c(
@@ -387,14 +394,14 @@ class TestAssessmentMode:
 
         assert "per_ticker" in result
         for entry in result["per_ticker"].values():
-            assert entry["action"] == "assessment"
-            assert entry["conviction"]["narrative_alignment"] in {"strong", "moderate", "weak"}
+            assert entry["action"] in {"Buy", "Hold", "Trim", "Exit"}
+            assert isinstance(entry["narrative_score"], float)
 
     @pytest.mark.asyncio
-    async def test_assessment_stored_to_agent_outputs(self, db_conn):
+    async def test_post_close_stored_to_agent_outputs(self, db_conn):
         _seed_full_state(db_conn)
         run_id = _seed_run_log(db_conn, "post_close")
-        client = _make_mock_client(response_data=_valid_assessment_output())
+        client = _make_mock_client(response_data=_valid_decision_output())
 
         await run_agent_c(
             db_conn, _agent_a_output(), _agent_b_output(), _source_health(),
@@ -408,10 +415,10 @@ class TestAssessmentMode:
         assert json.loads(row["output_blob"])["per_ticker"] is not None
 
     @pytest.mark.asyncio
-    async def test_assessment_stored_to_recommendations(self, db_conn):
+    async def test_post_close_stored_to_recommendations(self, db_conn):
         _seed_full_state(db_conn)
         run_id = _seed_run_log(db_conn, "post_close")
-        client = _make_mock_client(response_data=_valid_assessment_output())
+        client = _make_mock_client(response_data=_valid_decision_output())
 
         await run_agent_c(
             db_conn, _agent_a_output(), _agent_b_output(), _source_health(),
@@ -423,7 +430,7 @@ class TestAssessmentMode:
         ).fetchall()
         assert len(rows) == 2
         for r in rows:
-            assert r["action"] == "assessment"
+            assert r["action"] in {"Buy", "Hold", "Trim", "Exit"}
 
 
 class TestDecisionMode:
@@ -441,6 +448,8 @@ class TestDecisionMode:
         assert "per_ticker" in result
         for entry in result["per_ticker"].values():
             assert entry["action"] in {"Buy", "Hold", "Trim", "Exit"}
+            assert isinstance(entry["narrative_score"], float)
+            assert 0.0 <= entry["narrative_score"] <= 10.0
 
     @pytest.mark.asyncio
     async def test_decision_with_standing_actions(self, db_conn):
@@ -463,12 +472,12 @@ class TestDecisionMode:
 
 class TestFirstRunMode:
     @pytest.mark.asyncio
-    async def test_first_run_output(self, db_conn):
+    async def test_first_run_uses_decision_mode(self, db_conn):
+        """first_run flag is now ignored — agent always uses decision mode."""
         _seed_account(db_conn)
         _seed_constraints(db_conn)
         _seed_watchlist(db_conn)
         run_id = _seed_run_log(db_conn)
-        # No computed_targets → is_first_run=True
         output = _valid_first_run_output(["AAPL", "NVDA", "JPM"])
         client = _make_mock_client(response_data=output)
 
@@ -478,8 +487,8 @@ class TestFirstRunMode:
         )
 
         for entry in result["per_ticker"].values():
-            assert entry["conviction"]["quant_support"] == "n/a"
-            assert entry["conviction"]["signal_agreement"] == "n/a"
+            assert "narrative_score" in entry
+            assert isinstance(entry["narrative_score"], float)
 
     @pytest.mark.asyncio
     async def test_first_run_recommends_from_watchlist(self, db_conn):
@@ -506,7 +515,7 @@ class TestRetryAndDegradedOutput:
         _seed_full_state(db_conn)
         run_id = _seed_run_log(db_conn, "post_close")
 
-        valid_output = _valid_assessment_output()
+        valid_output = _valid_decision_output()
         client = _make_mock_client(side_effect=[
             "not valid json {{{",  # first attempt fails
             json.dumps(valid_output),  # retry succeeds
@@ -517,7 +526,7 @@ class TestRetryAndDegradedOutput:
             run_id, "post_close", is_first_run=False, client=client,
         )
 
-        assert result["per_ticker"]["AAPL"]["action"] == "assessment"
+        assert result["per_ticker"]["AAPL"]["action"] in {"Buy", "Hold", "Trim", "Exit"}
         assert client.generate.call_count == 2
 
     @pytest.mark.asyncio
@@ -536,7 +545,7 @@ class TestRetryAndDegradedOutput:
         )
 
         for entry in result["per_ticker"].values():
-            assert entry["conviction"]["narrative_alignment"] == "weak"
+            assert entry["narrative_score"] == 5.0
             assert "failed" in entry["rationale"].lower()
 
     @pytest.mark.asyncio
@@ -582,7 +591,7 @@ class TestAPIErrors:
 class TestStoreRecommendations:
     def test_stores_per_ticker_entries(self, db_conn):
         run_id = _seed_run_log(db_conn)
-        per_ticker = _valid_assessment_output()["per_ticker"]
+        per_ticker = _valid_decision_output()["per_ticker"]
         ids = store_recommendations(db_conn, run_id, per_ticker)
 
         assert len(ids) == 2
@@ -591,17 +600,44 @@ class TestStoreRecommendations:
         tickers = {r["ticker"] for r in rows}
         assert tickers == {"AAPL", "NVDA"}
 
-    def test_stores_conviction_as_json(self, db_conn):
+    def test_stores_narrative_score_and_multiplier(self, db_conn):
+        run_id = _seed_run_log(db_conn)
+        per_ticker = {
+            "AAPL": {"action": "Buy", "narrative_score": 8.0, "rationale": "test", "key_risk_factors": []},
+            "MSFT": {"action": "Hold", "narrative_score": 5.0, "rationale": "test", "key_risk_factors": []},
+        }
+        store_recommendations(db_conn, run_id, per_ticker)
+
+        rows = db_conn.execute(
+            "SELECT ticker, conviction_scores, conviction_weight FROM recommendations WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+        by_ticker = {r["ticker"]: r for r in rows}
+
+        aapl_scores = json.loads(by_ticker["AAPL"]["conviction_scores"])
+        assert aapl_scores["narrative_score"] == 8.0
+        assert aapl_scores["multiplier"] == 1.3
+        assert by_ticker["AAPL"]["conviction_weight"] == 1.3
+
+        msft_scores = json.loads(by_ticker["MSFT"]["conviction_scores"])
+        assert msft_scores["narrative_score"] == 5.0
+        assert msft_scores["multiplier"] == 1.0
+        assert by_ticker["MSFT"]["conviction_weight"] == 1.0
+
+    def test_assessment_entries_use_default_neutral_score(self, db_conn):
+        """Assessment entries (no narrative_score) default to 5.0 → multiplier 1.0."""
         run_id = _seed_run_log(db_conn)
         per_ticker = _valid_assessment_output()["per_ticker"]
         store_recommendations(db_conn, run_id, per_ticker)
 
         row = db_conn.execute(
-            "SELECT conviction_scores FROM recommendations WHERE ticker = 'AAPL' AND run_id = ?",
+            "SELECT conviction_scores, conviction_weight FROM recommendations WHERE ticker = 'AAPL' AND run_id = ?",
             (run_id,),
         ).fetchone()
         scores = json.loads(row["conviction_scores"])
-        assert scores["narrative_alignment"] == "strong"
+        assert scores["narrative_score"] == 5.0
+        assert scores["multiplier"] == 1.0
+        assert row["conviction_weight"] == 1.0
 
 
 class TestGetPreviousAssessment:
@@ -617,7 +653,6 @@ class TestGetPreviousAssessment:
         assert result is not None
         assert "AAPL" in result
         assert "conviction" in result["AAPL"]
-        assert result["AAPL"]["conviction"]["narrative_alignment"] == "strong"
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +696,7 @@ class TestRetryOnEmptyPerTicker:
         _seed_full_state(db_conn)
         run_id = _seed_run_log(db_conn, "post_close")
 
-        valid_output = _valid_assessment_output()
+        valid_output = _valid_decision_output()
         client = _make_mock_client(side_effect=[
             '{"per_ticker": {}}',        # attempt 1: valid JSON but fails validation
             json.dumps(valid_output),    # attempt 2: succeeds
@@ -672,7 +707,7 @@ class TestRetryOnEmptyPerTicker:
             run_id, "post_close", is_first_run=False, client=client,
         )
 
-        assert result["per_ticker"]["AAPL"]["action"] == "assessment"
+        assert result["per_ticker"]["AAPL"]["action"] in {"Buy", "Hold", "Trim", "Exit"}
         assert client.generate.call_count == 2
         # The corrective message appended on attempt 1 should reference the failure reason
         second_call_messages = client.generate.call_args_list[1][0][0]
