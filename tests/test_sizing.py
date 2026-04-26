@@ -5,11 +5,7 @@ import math
 
 import pytest
 
-from pipeline.sizing.conviction_map import (
-    CONVICTION_TABLE,
-    FIRST_RUN_TABLE,
-    get_conviction_weight,
-)
+from pipeline.sizing.conviction_map import narrative_multiplier
 from pipeline.sizing.normalizer import (
     cap_sector_concentrations,
     cap_single_positions,
@@ -92,71 +88,27 @@ def _insert_run_log(conn, run_type="pre_open"):
 # Test: Conviction Mapping — all 27 combinations
 # ---------------------------------------------------------------------------
 
-class TestConvictionMap:
-    def test_all_27_combinations_defined(self):
-        """Verify all 27 combinations exist in the lookup table."""
-        scores = ("strong", "moderate", "weak")
-        for na in scores:
-            for qs in scores:
-                for sa in scores:
-                    assert (na, qs, sa) in CONVICTION_TABLE, f"Missing: ({na}, {qs}, {sa})"
-        assert len(CONVICTION_TABLE) == 27
+class TestNarrativeMultiplier:
+    def test_score_5_is_neutral(self):
+        assert narrative_multiplier(5.0) == 1.0
 
-    def test_all_27_return_expected_weights(self):
-        """Each combination returns a float between 0 and 1."""
-        for key, weight in CONVICTION_TABLE.items():
-            assert 0.0 < weight <= 1.0, f"{key} has invalid weight {weight}"
+    def test_score_10_is_max(self):
+        assert abs(narrative_multiplier(10.0) - 1.5) < 1e-9
 
-    def test_strongest_is_highest(self):
-        assert CONVICTION_TABLE[("strong", "strong", "strong")] == 1.0
+    def test_score_0_is_min(self):
+        assert abs(narrative_multiplier(0.0) - 0.5) < 1e-9
 
-    def test_weakest_is_lowest(self):
-        assert CONVICTION_TABLE[("weak", "weak", "weak")] == 0.15
+    def test_score_above_10_clamped(self):
+        assert abs(narrative_multiplier(15.0) - 1.5) < 1e-9
 
-    def test_get_conviction_weight_normal(self):
-        conviction = {
-            "narrative_alignment": "strong",
-            "quant_support": "moderate",
-            "signal_agreement": "strong",
-        }
-        assert get_conviction_weight(conviction) == 0.85
+    def test_score_below_0_clamped(self):
+        assert abs(narrative_multiplier(-5.0) - 0.5) < 1e-9
 
-    def test_first_run_mapping(self):
-        """First run uses narrative_alignment only."""
-        for na, expected in FIRST_RUN_TABLE.items():
-            conviction = {
-                "narrative_alignment": na,
-                "quant_support": "n/a",
-                "signal_agreement": "n/a",
-            }
-            assert get_conviction_weight(conviction, is_first_run=True) == expected
+    def test_score_7_5(self):
+        assert abs(narrative_multiplier(7.5) - 1.25) < 1e-9
 
-    def test_first_run_auto_detect_na(self):
-        """When quant_support and signal_agreement are 'n/a', first-run mapping is used even without flag."""
-        conviction = {
-            "narrative_alignment": "moderate",
-            "quant_support": "n/a",
-            "signal_agreement": "n/a",
-        }
-        assert get_conviction_weight(conviction, is_first_run=False) == 0.45
-
-    def test_invalid_score_raises(self):
-        conviction = {
-            "narrative_alignment": "invalid",
-            "quant_support": "strong",
-            "signal_agreement": "strong",
-        }
-        with pytest.raises(ValueError):
-            get_conviction_weight(conviction)
-
-    def test_invalid_first_run_raises(self):
-        conviction = {
-            "narrative_alignment": "invalid",
-            "quant_support": "n/a",
-            "signal_agreement": "n/a",
-        }
-        with pytest.raises(ValueError):
-            get_conviction_weight(conviction, is_first_run=True)
+    def test_score_2_5(self):
+        assert abs(narrative_multiplier(2.5) - 0.75) < 1e-9
 
 
 # ---------------------------------------------------------------------------
