@@ -1,14 +1,10 @@
 """Position Sizing Engine — orchestrates the full sizing pipeline.
 
 Allocation model:
-  raw_score = agent_b.target_weight × tilt_factor(agent_a.sentiment, agent_a.confidence)
-  First-run fallback (no Agent B): FIRST_RUN_TABLE[narrative_alignment] × tilt_factor(...)
+  raw_score = agent_b.target_weight × narrative_multiplier(agent_c.narrative_score)
 
-The raw scores feed directly into enforce_constraints which handles proportional
-allocation, single-position cap (15%), sector cap, and dust floor.
-
-Agent C's categorical action is retained for UX/logging only. Trade generation
-is driven by the delta between target_weights and current holdings.
+A zero Agent B weight always produces a zero score regardless of narrative_score.
+Agent C action is retained for UX/logging only.
 """
 
 import logging
@@ -19,39 +15,6 @@ logger = logging.getLogger(__name__)
 
 from pipeline.db.helpers import get_account, get_constraints
 from pipeline.sizing.conviction_map import narrative_multiplier
-
-# ---------------------------------------------------------------------------
-# Legacy shims — kept here until engine.py is refactored in Task 2.
-# These replicate the old conviction_map behaviour so existing engine logic
-# continues to work without modification during the transition.
-# ---------------------------------------------------------------------------
-_SENTIMENT_TILT: dict[tuple[str, str], float] = {
-    ("bullish",  "strong"):   1.30,
-    ("bullish",  "moderate"): 1.20,
-    ("bullish",  "weak"):     1.10,
-    ("neutral",  "strong"):   1.00,
-    ("neutral",  "moderate"): 1.00,
-    ("neutral",  "weak"):     1.00,
-    ("bearish",  "weak"):     0.90,
-    ("bearish",  "moderate"): 0.80,
-    ("bearish",  "strong"):   0.70,
-}
-
-FIRST_RUN_TABLE: dict[str, float] = {
-    "very_strong": 0.90,
-    "strong":      0.70,
-    "moderate":    0.45,
-    "weak":        0.25,
-    "very_weak":   0.10,
-}
-
-
-def tilt_factor(sentiment: str, confidence: str) -> float:
-    return _SENTIMENT_TILT.get((sentiment, confidence), 1.0)
-
-
-def raw_allocation_score(b_weight: float, a_sentiment: str, a_confidence: str) -> float:
-    return max(0.0, b_weight * tilt_factor(a_sentiment, a_confidence))
 from pipeline.sizing.normalizer import enforce_constraints
 from pipeline.sizing.trade_builder import (
     apply_trade,
@@ -124,44 +87,22 @@ def run_sizing_engine(
         for ticker in omitted:
             agent_c_output[ticker] = {
                 "action": "Hold",
-                "conviction": {
-                    "narrative_alignment": "moderate",
-                    "narrative_confidence": 5.0,
-                    "quant_support": "n/a",
-                    "quant_confidence": 0.0,
-                    "signal_agreement": "n/a",
-                    "signal_confidence": 0.0,
-                },
+                "narrative_score": 5.0,
                 "rationale": "Implicit Hold: Agent C omitted this held ticker.",
                 "key_risk_factors": [],
                 "_implicit_hold": True,
             }
 
-    b_per_ticker = ({} if is_first_run else (agent_b_output or {})).get("per_ticker", {})
-    a_per_ticker = (agent_a_output or {}).get("per_ticker", {})
+    b_per_ticker = (agent_b_output or {}).get("per_ticker", {})
 
     actions: dict[str, str] = {}
     raw_scores: dict[str, float] = {}
 
     for ticker, data in agent_c_output.items():
         actions[ticker] = data["action"]
-
-        a_data = a_per_ticker.get(ticker, {})
-        sentiment = a_data.get("sentiment", "neutral")
-        confidence = a_data.get("confidence", "weak")
-
-        b_data = b_per_ticker.get(ticker, {})
-        b_weight = b_data.get("target_weight")
-
-        if b_weight is not None and b_weight > 0:
-            score = raw_allocation_score(b_weight, sentiment, confidence)
-        else:
-            # First run or ticker not covered by Agent B: use narrative table.
-            na = data["conviction"].get("narrative_alignment", "weak")
-            base = FIRST_RUN_TABLE.get(na, 0.25)
-            score = max(0.0, base * tilt_factor(sentiment, confidence))
-
-        raw_scores[ticker] = score
+        b_weight = b_per_ticker.get(ticker, {}).get("target_weight", 0.0)
+        narrative_score = float(data.get("narrative_score", 5.0))
+        raw_scores[ticker] = narrative_multiplier(narrative_score) * b_weight
 
     # Resolve sector map before constraint enforcement.
     all_tickers = list(raw_scores.keys())

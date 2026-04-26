@@ -382,58 +382,73 @@ class TestComputedTargets:
 
 
 # ---------------------------------------------------------------------------
-# Test: Full Engine — first run from 100% cash
+# Test: Full Engine — narrative modulation
 # ---------------------------------------------------------------------------
 
-class TestEngineFirstRun:
-    def test_first_run_from_cash(self, db_conn):
-        """First run produces buy trades for all recommended tickers from cash."""
+class TestEngineNarrativeModulation:
+    def test_zero_agent_b_weight_stays_zero_regardless_of_narrative_score(self, db_conn):
+        """A ticker with Agent B weight=0 gets weight=0 even if narrative_score is 10."""
         _init_account(db_conn, cash=100_000.0)
         _insert_constraints(db_conn)
         _insert_watchlist(db_conn, [
             ("AAPL", "Apple", "Information Technology"),
             ("MSFT", "Microsoft", "Information Technology"),
             ("JPM", "JPMorgan", "Financials"),
-            ("XOM", "Exxon", "Energy"),
-            ("JNJ", "J&J", "Health Care"),
         ])
         run_id = _insert_run_log(db_conn)
 
+        agent_b_output = {
+            "per_ticker": {
+                "AAPL": {"target_weight": 0.15, "volatility_30d": 0.25, "health_score": "normal", "flags": []},
+                "MSFT": {"target_weight": 0.10, "volatility_30d": 0.22, "health_score": "normal", "flags": []},
+                "JPM":  {"target_weight": 0.0,  "volatility_30d": 0.20, "health_score": "normal", "flags": []},
+            }
+        }
         agent_c_output = {
-            "AAPL": {
-                "action": "Buy",
-                "conviction": {"narrative_alignment": "strong", "quant_support": "n/a", "signal_agreement": "n/a"},
-            },
-            "MSFT": {
-                "action": "Buy",
-                "conviction": {"narrative_alignment": "moderate", "quant_support": "n/a", "signal_agreement": "n/a"},
-            },
-            "JPM": {
-                "action": "Buy",
-                "conviction": {"narrative_alignment": "weak", "quant_support": "n/a", "signal_agreement": "n/a"},
-            },
+            "AAPL": {"action": "Buy",  "narrative_score": 8.0},
+            "MSFT": {"action": "Buy",  "narrative_score": 6.0},
+            "JPM":  {"action": "Buy",  "narrative_score": 10.0},  # high score, zero B weight
         }
         fill_prices = {"AAPL": 150.0, "MSFT": 300.0, "JPM": 200.0}
 
-        result = run_sizing_engine(db_conn, run_id, agent_c_output, fill_prices, is_first_run=True)
+        result = run_sizing_engine(
+            db_conn, run_id, agent_c_output, fill_prices,
+            agent_b_output=agent_b_output,
+        )
 
-        # Should have buy trades for all 3 tickers
-        assert len(result["trade_list"]) == 3
-        for trade in result["trade_list"]:
-            assert trade["action"] == "Buy"
-            assert trade["shares"] > 0
+        assert result["target_weights"].get("JPM", 0.0) == 0.0
+        assert result["target_weights"].get("AAPL", 0.0) > 0.0
+        assert result["target_weights"].get("MSFT", 0.0) > 0.0
 
-        # Holdings should now exist
-        holdings = db_conn.execute("SELECT * FROM holdings").fetchall()
-        assert len(holdings) == 3
+    def test_high_narrative_score_amplifies_weight(self, db_conn):
+        """Ticker with narrative_score=10 gets larger weight than same B-weight at score=5."""
+        _init_account(db_conn, cash=100_000.0)
+        _insert_constraints(db_conn)
+        _insert_watchlist(db_conn, [
+            ("AAPL", "Apple", "Information Technology"),
+            ("MSFT", "Microsoft", "Information Technology"),
+        ])
+        run_id = _insert_run_log(db_conn)
 
-        # Cash should be reduced but above floor
-        account = db_conn.execute("SELECT cash_balance FROM account WHERE account_id = 1").fetchone()
-        assert account["cash_balance"] >= 100_000.0 * 0.05 - 0.01  # cash floor
+        agent_b_output = {
+            "per_ticker": {
+                "AAPL": {"target_weight": 0.10, "volatility_30d": 0.25, "health_score": "normal", "flags": []},
+                "MSFT": {"target_weight": 0.10, "volatility_30d": 0.22, "health_score": "normal", "flags": []},
+            }
+        }
+        agent_c_output = {
+            "AAPL": {"action": "Buy",  "narrative_score": 10.0},
+            "MSFT": {"action": "Hold", "narrative_score": 5.0},
+        }
+        fill_prices = {"AAPL": 150.0, "MSFT": 300.0}
 
-        # Target weights should exist
-        assert result["computed_target_id"] is not None
-        assert sum(result["target_weights"].values()) > 0
+        result = run_sizing_engine(
+            db_conn, run_id, agent_c_output, fill_prices,
+            agent_b_output=agent_b_output,
+        )
+
+        # AAPL raw=0.10×1.5=0.15, MSFT raw=0.10×1.0=0.10 → AAPL outweighs MSFT
+        assert result["target_weights"]["AAPL"] > result["target_weights"]["MSFT"]
 
 
 # ---------------------------------------------------------------------------
@@ -454,18 +469,12 @@ class TestEngineAllExit:
         run_id = _insert_run_log(db_conn)
 
         agent_c_output = {
-            "AAPL": {
-                "action": "Exit",
-                "conviction": {"narrative_alignment": "weak", "quant_support": "weak", "signal_agreement": "weak"},
-            },
-            "MSFT": {
-                "action": "Exit",
-                "conviction": {"narrative_alignment": "weak", "quant_support": "weak", "signal_agreement": "weak"},
-            },
+            "AAPL": {"action": "Exit", "narrative_score": 2.0},
+            "MSFT": {"action": "Exit", "narrative_score": 2.0},
         }
         fill_prices = {"AAPL": 150.0, "MSFT": 300.0}
 
-        result = run_sizing_engine(db_conn, run_id, agent_c_output, fill_prices)
+        result = run_sizing_engine(db_conn, run_id, agent_c_output, fill_prices, mutate_portfolio=True)
 
         # All positions should be gone
         holdings = db_conn.execute("SELECT * FROM holdings").fetchall()
