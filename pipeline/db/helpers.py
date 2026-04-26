@@ -1,6 +1,10 @@
 import json
+import logging
 import sqlite3
+from io import StringIO
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 def get_portfolio_value(
@@ -157,6 +161,9 @@ def store_recommendations(
             if quant_data.get(k) is not None
         }
 
+        ns = float(entry.get("narrative_score", 5.0))
+        multiplier = round(0.5 + max(0.0, min(10.0, ns)) / 10.0, 4)
+
         cursor = conn.execute(
             """INSERT INTO recommendations
                (run_id, timestamp, ticker, action, conviction_scores,
@@ -168,8 +175,8 @@ def store_recommendations(
                 ts,
                 ticker,
                 entry["action"],
-                json.dumps(entry.get("conviction", {})),
-                None,
+                json.dumps({"narrative_score": ns, "multiplier": multiplier}),
+                multiplier,
                 entry.get("rationale", ""),
                 json.dumps(quant_metrics) if quant_metrics else None,
                 json.dumps(entry.get("key_risk_factors", [])),
@@ -180,6 +187,188 @@ def store_recommendations(
         ids.append(cursor.lastrowid)
     conn.commit()
     return ids
+
+
+def load_ohlcv_cache(
+    conn: sqlite3.Connection,
+    tickers: list[str],
+    lookback_days: int,
+) -> dict[str, "pd.DataFrame"]:
+    """Load OHLCV data from market_history_cache as {ticker: OHLCV DataFrame}."""
+    import pandas as pd
+    from datetime import datetime, timezone, timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    result: dict[str, pd.DataFrame] = {}
+    for ticker in tickers:
+        rows = conn.execute(
+            """SELECT date, open, high, low, close, volume
+               FROM market_history_cache
+               WHERE ticker = ? AND date >= ?
+               ORDER BY date ASC""",
+            (ticker, cutoff),
+        ).fetchall()
+        if not rows:
+            result[ticker] = pd.DataFrame()
+            continue
+        df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date")
+        result[ticker] = df
+    return result
+
+
+def load_edgar_cache(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, dict]:
+    """Load EDGAR statement data from edgar_filings_cache as {ticker: {stmt: df}}."""
+    import pandas as pd
+
+    result: dict[str, dict] = {ticker: {} for ticker in tickers}
+    if not tickers:
+        return result
+
+    placeholders = ",".join("?" * len(tickers))
+    rows = conn.execute(
+        f"SELECT ticker, statement_type, payload_json FROM edgar_filings_cache WHERE ticker IN ({placeholders})",
+        tickers,
+    ).fetchall()
+
+    for ticker, stmt_type, payload in rows:
+        if stmt_type == "empty":
+            continue
+        try:
+            df = pd.read_json(StringIO(payload))
+            df.index = pd.to_datetime(df.index)
+            result[ticker][stmt_type] = df
+        except Exception as e:
+            logger.warning("Failed to parse EDGAR payload for %s/%s: %s", ticker, stmt_type, e)
+            result[ticker][stmt_type] = pd.DataFrame()
+
+    return result
+
+
+def revert_trades(conn: sqlite3.Connection, run_id: int) -> int:
+    """Reverse all portfolio mutations (holdings, cash) from a pre-open run.
+
+    Returns the number of trade rows reversed.
+    """
+    trades = conn.execute(
+        """SELECT t.ticker, t.action, t.shares, t.simulated_fill_price, t.realized_pnl
+           FROM trades t
+           JOIN recommendations r ON t.recommendation_id = r.recommendation_id
+           WHERE r.run_id = ?""",
+        (run_id,),
+    ).fetchall()
+
+    cash_delta = 0.0  # net cash change that happened during the run (positive = cash in)
+    for t in trades:
+        action, shares, price = t["action"], t["shares"], t["simulated_fill_price"]
+        if action == "Buy":
+            cash_delta -= shares * price
+        else:  # Trim or Exit
+            cash_delta += shares * price
+
+    for t in trades:
+        ticker = t["ticker"]
+        action, shares, price = t["action"], t["shares"], t["simulated_fill_price"]
+        realized_pnl = t["realized_pnl"] or 0.0
+
+        if action == "Buy":
+            row = conn.execute(
+                "SELECT shares, cost_basis_per_share FROM holdings WHERE ticker = ?", (ticker,)
+            ).fetchone()
+            if row is None:
+                continue  # position already gone, skip
+            cur_shares = row["shares"]
+            cur_basis = row["cost_basis_per_share"]
+            pre_shares = cur_shares - shares
+            if pre_shares <= 0.001:
+                conn.execute("DELETE FROM holdings WHERE ticker = ?", (ticker,))
+            else:
+                pre_basis = (cur_basis * cur_shares - shares * price) / pre_shares
+                conn.execute(
+                    "UPDATE holdings SET shares = ?, cost_basis_per_share = ? WHERE ticker = ?",
+                    (pre_shares, pre_basis, ticker),
+                )
+
+        elif action in ("Trim", "Exit"):
+            row = conn.execute(
+                "SELECT shares, cost_basis_per_share FROM holdings WHERE ticker = ?", (ticker,)
+            ).fetchone()
+            pre_shares = shares  # what we had before the sell
+            # cost_basis = fill_price - realized_pnl / shares (from P&L formula)
+            pre_basis = price - (realized_pnl / shares if shares > 0 else 0.0)
+            sector_row = conn.execute(
+                "SELECT sector FROM watchlist WHERE ticker = ?", (ticker,)
+            ).fetchone()
+            sector = sector_row["sector"] if sector_row else ""
+            if row is None:
+                # Position was fully liquidated; restore it
+                conn.execute(
+                    "INSERT INTO holdings (ticker, shares, cost_basis_per_share, sector) VALUES (?, ?, ?, ?)",
+                    (ticker, pre_shares, pre_basis, sector),
+                )
+            else:
+                # Partial trim: add shares back (cost basis unchanged)
+                conn.execute(
+                    "UPDATE holdings SET shares = ? WHERE ticker = ?",
+                    (row["shares"] + pre_shares, ticker),
+                )
+
+    # Reverse cash change
+    conn.execute(
+        "UPDATE account SET cash_balance = cash_balance - ? WHERE account_id = 1",
+        (cash_delta,),
+    )
+    conn.commit()
+    return len(trades)
+
+
+class OverwriteResult:
+    def __init__(self, prior_run_id: int, reverted_trade_count: int) -> None:
+        self.prior_run_id = prior_run_id
+        self.reverted_trade_count = reverted_trade_count
+
+
+def overwrite_slot(conn: sqlite3.Connection, session_date: str, run_type: str) -> OverwriteResult | None:
+    """Delete all data for an existing (session_date, run_type) slot so it can be re-run.
+
+    For pre_open runs, reverses simulated trade mutations first.
+    For standing_events, NULLs created_from_run_id rather than deleting the event.
+    Returns OverwriteResult if a slot existed, None if no prior run found.
+    """
+    row = conn.execute(
+        "SELECT run_id FROM run_log WHERE session_date = ? AND run_type = ?",
+        (session_date, run_type),
+    ).fetchone()
+    if row is None:
+        return None
+
+    run_id = row["run_id"]
+    trade_count = 0
+
+    if run_type == "pre_open":
+        trade_count = revert_trades(conn, run_id)
+
+    # Delete trade records
+    conn.execute(
+        """DELETE FROM trades WHERE recommendation_id IN (
+               SELECT recommendation_id FROM recommendations WHERE run_id = ?
+           )""",
+        (run_id,),
+    )
+    # Delete child rows keyed by run_id
+    for table in ("recommendations", "snapshots", "agent_outputs", "computed_targets", "kg_seed_log"):
+        conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+
+    # Preserve standing events but sever the run reference
+    conn.execute(
+        "UPDATE standing_events SET created_from_run_id = NULL WHERE created_from_run_id = ?",
+        (run_id,),
+    )
+
+    conn.execute("DELETE FROM run_log WHERE run_id = ?", (run_id,))
+    conn.commit()
+    return OverwriteResult(prior_run_id=run_id, reverted_trade_count=trade_count)
 
 
 def get_previous_assessment(conn: sqlite3.Connection) -> dict | None:
