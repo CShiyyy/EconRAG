@@ -11,7 +11,6 @@ def record_snapshot(
     conn: sqlite3.Connection,
     run_id: int,
     market_data: dict | None,
-    run_type: str,
 ) -> None:
     """Record current portfolio state to the snapshots table.
 
@@ -20,7 +19,6 @@ def record_snapshot(
         run_id: Current run ID.
         market_data: Dict of {ticker: {current_price, open_price, previous_close}}.
                      None if portfolio is cash-only.
-        run_type: "pre_open" or "post_close".
     """
     account = conn.execute(
         "SELECT cash_balance FROM account WHERE account_id = 1"
@@ -34,17 +32,12 @@ def record_snapshot(
     per_ticker: dict[str, dict] = {}
     holdings_value = 0.0
 
-    # Select valuation price based on run type:
-    # Pre-open: previous_close (settled price before today's open).
-    # Post-close: current_price (today's closing price).
-    val_key = "previous_close" if run_type == "pre_open" else "current_price"
-
     for row in holdings:
         ticker = row["ticker"]
         shares = row["shares"]
 
         if market_data and ticker in market_data:
-            price = market_data[ticker].get(val_key) or market_data[ticker].get("current_price", 0.0)
+            price = market_data[ticker].get("current_price", 0.0)
         else:
             price = 0.0
 

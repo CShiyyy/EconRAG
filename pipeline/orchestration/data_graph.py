@@ -61,6 +61,12 @@ async def ingest_node(state: PipelineState) -> dict:
         len(serialized.get("social_hits", [])),
         len(serialized.get("parsed_content", [])),
     )
+    for h in source_health:
+        if h.get("status") != "success":
+            logger.warning(
+                "Source '%s': status=%s, error=%s",
+                h.get("source"), h.get("status"), h.get("error_detail") or "none",
+            )
     return {"ingestion_result": serialized, "source_health": source_health}
 
 

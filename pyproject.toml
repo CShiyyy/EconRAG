@@ -24,6 +24,13 @@ dependencies = [
     "pydantic>=2.5",
     "fastapi>=0.115",
     "uvicorn>=0.32",
+    "ta>=0.11",
+    "cvxpy>=1.5",
+    "scikit-learn>=1.4",
+    "osqp>=0.6",
+    "scs>=3.2",
+    "exchange_calendars>=4.5",
+    "pytz>=2024.1",
 ]
 
 [project.optional-dependencies]

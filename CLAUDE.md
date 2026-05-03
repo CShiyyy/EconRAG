@@ -29,8 +29,9 @@ backend/                    # FastAPI app (Phase 8)
   routers/
     init.py                 # POST /api/init, GET /api/init/status
     portfolio.py            # GET /api/portfolio, snapshots, benchmark
-    recommendations.py      # GET /api/recommendations
-    runs.py                 # GET /api/runs, POST /api/runs/trigger
+    recommendations.py      # GET /api/recommendations (date+slot filter), GET /api/recommendations/dates
+    runs.py                 # GET /api/runs (with queued/executed counts), GET /api/runs/slot-status, POST /api/runs/trigger
+    trades.py               # GET /api/trades (paginated, status filter), GET /api/trades/latest-run
     standing_events.py      # CRUD for standing events
     constraints.py          # GET/PATCH /api/constraints
     watchlist.py            # GET /api/watchlist, POST /api/watchlist/refresh
@@ -67,7 +68,7 @@ pipeline/
   agents/
     agent_a.py              # Local LLM context retriever (Gemma 4 E4B via Ollama)
     agent_b.py              # Deterministic quant script (drift, volatility, health scores)
-    agent_c.py              # Cloud LLM synthesis (Gemini/Claude, assessment + decision modes)
+    agent_c.py              # Cloud LLM synthesis (Gemini/Claude, decision mode only)
     cloud_client.py         # Abstracted API client for Gemini/Claude
   sizing/
     conviction_map.py       # 27-combination conviction weight lookup table
@@ -77,6 +78,7 @@ pipeline/
   orchestration/
     state.py                # PipelineState TypedDict
     graph.py                # Parent LangGraph graph and pipeline entry point
+    clock.py                # ET slot detection (detect_slot, market_phase) using exchange_calendars
     data_graph.py           # Data pipeline LangGraph subgraph (seed_profiles → ingest → extract → embed → standing)
     reasoning_graph.py      # Agent reasoning LangGraph subgraph
     execution_graph.py      # Execution LangGraph subgraph
@@ -121,8 +123,10 @@ Read `ARCHITECTURE.md` for the full system design (ontology, schemas, agent outp
 
 ### Key Architectural Concepts
 
-- **Three agents:** Agent A (local Gemma 4 E4B via LightRAG queries), Agent B (deterministic Python quant metrics), Agent C (cloud LLM synthesis producing trade actions or assessments)
-- **Two run types:** Post-close (assessment only, no trades) and pre-open (decision mode, produces trades)
+- **Three agents:** Agent A (local Gemma 4 E4B via LightRAG queries), Agent B (deterministic Python quant metrics), Agent C (cloud LLM synthesis, decision mode only — always produces trade actions)
+- **Single run type:** Every run executes previously queued trades first, then queues new trades from the current sizing run. No pre_open/post_close distinction. `run_log.run_type` is stored as `"scheduled"`.
+- **Trade lifecycle:** Trades are `queued` by the run that produces them (`queued_run_id`). The next run executes them (`execution_run_id`, status → `executed`). If a run is re-triggered before execution, prior queued trades are marked `overwritten`.
+- **Non-trading days:** `market_phase()` returns `"closed_day"` for weekends/holidays. Runs are still allowed — sizing uses the prior session's close and `target_close_at` is set to the next open-session close. The Dashboard shows an info banner explaining that queued trades will execute at the next open.
 - **First-run special case:** Agent B is skipped, re-query disabled, Agent C uses narrative_alignment-only conviction scoring
 - **Position Sizing Engine:** Pure Python, no LLM — maps 27 conviction score combinations to weights, enforces constraints (single position cap, sector cap, dust floor, cash floor) in strict order
 - **Re-query logic:** Deterministic Python (not LLM) comparing Agent A sentiment vs Agent B health scores — max 1 re-query per run

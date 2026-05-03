@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import praw
 
 from pipeline.ingestion.health import timed_health
 from pipeline.ingestion.models import SocialHit, SourceHealth
+
+logger = logging.getLogger(__name__)
 
 
 def _fetch_reddit_posts(
@@ -44,9 +47,11 @@ def _fetch_reddit_posts(
                                 submission.created_utc, tz=timezone.utc
                             ).isoformat(),
                         ))
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Reddit search failed for %s in r/%s: %s", ticker_str, sub_name, exc)
                     continue
-        except Exception:
+        except Exception as exc:
+            logger.warning("Reddit subreddit access failed for r/%s: %s", sub_name, exc)
             continue
 
     return hits
@@ -66,6 +71,7 @@ async def fetch_social(
         If credentials are missing, returns empty list + error health.
     """
     if not client_id or not client_secret:
+        logger.warning("Reddit credentials not configured — skipping social fetch (set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env)")
         return [], SourceHealth(
             source="reddit",
             status="error",

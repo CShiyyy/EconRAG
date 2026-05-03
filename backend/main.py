@@ -12,6 +12,7 @@ from backend.routers import (
     recommendations,
     runs,
     standing_events,
+    trades,
     watchlist,
 )
 
@@ -31,6 +32,7 @@ app.include_router(recommendations.router, prefix="/api")
 app.include_router(runs.router, prefix="/api")
 app.include_router(standing_events.router, prefix="/api")
 app.include_router(constraints.router, prefix="/api")
+app.include_router(trades.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")

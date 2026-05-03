@@ -110,13 +110,23 @@ def _fetch_info_sync(ticker: str) -> dict | None:
 
 
 def _fetch_news_headlines_sync(ticker: str) -> list[str]:
-    """Return up to _MAX_HEADLINES headline strings from yfinance ticker.news."""
+    """Return up to _MAX_HEADLINES headline strings from yfinance ticker.news.
+
+    Handles both the current nested-content format (article["content"]["title"])
+    and the legacy flat format (article["title"]).
+    """
     try:
         news = yf.Ticker(ticker).news or []
-        return [
-            a["title"] for a in news[:_MAX_HEADLINES]
-            if a.get("title")
-        ]
+        headlines = []
+        for a in news[:_MAX_HEADLINES]:
+            content = a.get("content")
+            if isinstance(content, dict):
+                title = content.get("title", "")
+            else:
+                title = a.get("title", "")
+            if title:
+                headlines.append(title)
+        return headlines
     except Exception as exc:
         logger.warning("yfinance news failed for %s: %s", ticker, exc)
         return []

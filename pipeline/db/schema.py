@@ -7,12 +7,13 @@ TABLES_SQL: list[str] = [
     CREATE TABLE IF NOT EXISTS run_log (
         run_id          INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp       TEXT    NOT NULL,
-        run_type        TEXT    NOT NULL CHECK(run_type IN ('pre_open', 'post_close', 'non_trading_day')),
+        run_type        TEXT    NOT NULL DEFAULT 'scheduled',
         is_first_run    INTEGER NOT NULL DEFAULT 0,
         source_status   TEXT,
         requery_triggered INTEGER NOT NULL DEFAULT 0,
         requery_reason  TEXT,
-        wall_clock_seconds REAL
+        wall_clock_seconds REAL,
+        session_date    TEXT
     )
     """,
     # 2. account
@@ -93,6 +94,7 @@ TABLES_SQL: list[str] = [
         action            TEXT    NOT NULL CHECK(action IN ('Hold', 'Buy', 'Trim', 'Exit', 'assessment')),
         conviction_scores TEXT    NOT NULL,
         conviction_weight REAL,
+        target_weight     REAL,
         rationale         TEXT    NOT NULL,
         key_quant_metrics TEXT,
         key_risk_factors  TEXT,
@@ -103,18 +105,29 @@ TABLES_SQL: list[str] = [
     # 10. trades — FK to recommendations
     """
     CREATE TABLE IF NOT EXISTS trades (
-        trade_id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        recommendation_id   INTEGER NOT NULL REFERENCES recommendations(recommendation_id),
-        ticker              TEXT    NOT NULL,
-        action              TEXT    NOT NULL,
-        shares              REAL    NOT NULL,
-        simulated_fill_price REAL   NOT NULL,
-        fill_type           TEXT    NOT NULL DEFAULT 'open_price',
-        gap_pct             REAL,
-        slippage_applied    REAL    NOT NULL DEFAULT 0.0,
-        realized_pnl        REAL,
-        timestamp           TEXT    NOT NULL
+        trade_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        recommendation_id     INTEGER NOT NULL REFERENCES recommendations(recommendation_id),
+        ticker                TEXT    NOT NULL,
+        action                TEXT    NOT NULL,
+        shares                REAL    NOT NULL,
+        simulated_fill_price  REAL    NOT NULL,
+        fill_type             TEXT    NOT NULL DEFAULT 'previous_close',
+        gap_pct               REAL,
+        slippage_applied      REAL    NOT NULL DEFAULT 0.0,
+        realized_pnl          REAL,
+        timestamp             TEXT    NOT NULL,
+        status                TEXT    NOT NULL DEFAULT 'queued',
+        queued_at             TEXT,
+        queued_run_id         INTEGER REFERENCES run_log(run_id),
+        executed_at           TEXT,
+        execution_run_id      INTEGER REFERENCES run_log(run_id),
+        execution_fill_price  REAL,
+        target_close_at       TEXT
     )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_trades_status_queued
+    ON trades(status) WHERE status = 'queued'
     """,
     # 11. agent_outputs — FK to run_log
     """
@@ -161,13 +174,39 @@ TABLES_SQL: list[str] = [
     """
     CREATE INDEX IF NOT EXISTS idx_kg_seed_log_type ON kg_seed_log(seed_type)
     """,
+    # 14. market_history_cache — multi-year OHLCV for Second Tower factors
+    """
+    CREATE TABLE IF NOT EXISTS market_history_cache (
+        ticker  TEXT    NOT NULL,
+        date    TEXT    NOT NULL,
+        open    REAL    NOT NULL,
+        high    REAL    NOT NULL,
+        low     REAL    NOT NULL,
+        close   REAL    NOT NULL,
+        volume  REAL    NOT NULL,
+        PRIMARY KEY (ticker, date)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_mhc_ticker ON market_history_cache(ticker)
+    """,
+    # 15. edgar_filings_cache — SEC 10-K statement data for Second Tower factors
+    """
+    CREATE TABLE IF NOT EXISTS edgar_filings_cache (
+        ticker          TEXT    NOT NULL,
+        statement_type  TEXT    NOT NULL,
+        payload_json    TEXT    NOT NULL,
+        cached_at       TEXT    NOT NULL,
+        PRIMARY KEY (ticker, statement_type)
+    )
+    """,
 ]
 
 EXPECTED_TABLES: set[str] = {
     "run_log", "account", "watchlist", "constraints", "holdings",
     "canonical_entities", "computed_targets", "snapshots",
     "recommendations", "trades", "agent_outputs", "standing_events",
-    "kg_seed_log",
+    "kg_seed_log", "market_history_cache", "edgar_filings_cache",
 }
 
 
@@ -183,13 +222,93 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
 
     Safe to call on any database version — already-present columns are silently skipped.
     """
-    migrations = [
+    # ---- Phase 1: legacy migrations (idempotent) ----
+    for sql in [
         "ALTER TABLE kg_seed_log ADD COLUMN seed_text TEXT",
         "ALTER TABLE recommendations ADD COLUMN key_risk_factors TEXT",
-    ]
-    for sql in migrations:
+        "ALTER TABLE recommendations ADD COLUMN target_weight REAL",
+        "ALTER TABLE run_log ADD COLUMN session_date TEXT",
+    ]:
         try:
             conn.execute(sql)
             conn.commit()
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass
+
+    conn.execute(
+        "UPDATE run_log SET session_date = SUBSTR(timestamp, 1, 10) WHERE session_date IS NULL"
+    )
+    conn.commit()
+
+    # ---- Phase 2: drop the old unique slot index (queue semantics replace it) ----
+    conn.execute("DROP INDEX IF EXISTS idx_run_log_session_slot")
+    conn.commit()
+
+    # ---- Phase 3: rebuild run_log to remove run_type CHECK constraint ----
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='run_log'"
+    ).fetchone()
+    if row and "CHECK" in (row[0] or ""):
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("""
+            CREATE TABLE run_log_new (
+                run_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp           TEXT    NOT NULL,
+                run_type            TEXT    NOT NULL DEFAULT 'scheduled',
+                is_first_run        INTEGER NOT NULL DEFAULT 0,
+                source_status       TEXT,
+                requery_triggered   INTEGER NOT NULL DEFAULT 0,
+                requery_reason      TEXT,
+                wall_clock_seconds  REAL,
+                session_date        TEXT
+            )
+        """)
+        conn.execute("INSERT INTO run_log_new SELECT * FROM run_log")
+        conn.execute("DROP TABLE run_log")
+        conn.execute("ALTER TABLE run_log_new RENAME TO run_log")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+
+    # ---- Phase 4: new trades columns ----
+    for sql in [
+        "ALTER TABLE trades ADD COLUMN status TEXT NOT NULL DEFAULT 'executed'",
+        "ALTER TABLE trades ADD COLUMN queued_at TEXT",
+        "ALTER TABLE trades ADD COLUMN queued_run_id INTEGER REFERENCES run_log(run_id)",
+        "ALTER TABLE trades ADD COLUMN executed_at TEXT",
+        "ALTER TABLE trades ADD COLUMN execution_run_id INTEGER REFERENCES run_log(run_id)",
+        "ALTER TABLE trades ADD COLUMN execution_fill_price REAL",
+        "ALTER TABLE trades ADD COLUMN target_close_at TEXT",
+    ]:
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_status_queued "
+            "ON trades(status) WHERE status = 'queued'"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    # Backfill: existing rows were immediate executions, treat queue == execution
+    conn.execute("""
+        UPDATE trades SET
+            queued_at            = timestamp,
+            executed_at          = timestamp,
+            execution_fill_price = simulated_fill_price,
+            target_close_at      = timestamp
+        WHERE queued_at IS NULL
+    """)
+    conn.execute("""
+        UPDATE trades SET
+            queued_run_id    = (SELECT run_id FROM recommendations
+                                WHERE recommendations.recommendation_id = trades.recommendation_id),
+            execution_run_id = (SELECT run_id FROM recommendations
+                                WHERE recommendations.recommendation_id = trades.recommendation_id)
+        WHERE queued_run_id IS NULL
+    """)
+    conn.commit()

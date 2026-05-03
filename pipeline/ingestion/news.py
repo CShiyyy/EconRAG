@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -12,6 +13,31 @@ from pipeline.ingestion.health import timed_health
 from pipeline.ingestion.models import NewsHit, SourceHealth
 from pipeline.config import NEWS_WINDOW_HOURS
 
+logger = logging.getLogger(__name__)
+
+
+def _parse_yfinance_article(article: dict) -> tuple[str, str, str] | None:
+    """Extract (title, url, pub_date_iso) from a yfinance news article dict.
+
+    Handles both the legacy flat format and the current nested-content format
+    introduced in yfinance 0.2.x:
+    - New: {"id": ..., "content": {"title": ..., "pubDate": "2026-...", "canonicalUrl": {"url": ...}}}
+    - Old: {"title": ..., "providerPublishTime": <unix int>, "link": ...}
+    """
+    content = article.get("content")
+    if isinstance(content, dict):
+        title = content.get("title", "")
+        pub_str = content.get("pubDate", "")
+        url = (content.get("canonicalUrl") or {}).get("url", "")
+        return title, url, pub_str
+
+    # Legacy flat format
+    title = article.get("title", "")
+    url = article.get("link", "")
+    pub_ts = article.get("providerPublishTime", 0)
+    pub_iso = datetime.fromtimestamp(pub_ts, tz=timezone.utc).isoformat() if pub_ts else ""
+    return title, url, pub_iso
+
 
 def _fetch_yfinance_news(tickers: list[str], cutoff: datetime) -> list[NewsHit]:
     """Sync: fetch news from yfinance for all tickers."""
@@ -20,18 +46,25 @@ def _fetch_yfinance_news(tickers: list[str], cutoff: datetime) -> list[NewsHit]:
         try:
             ticker = yf.Ticker(ticker_str)
             for article in (ticker.news or []):
-                pub_ts = article.get("providerPublishTime", 0)
-                pub_dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
-                if pub_dt < cutoff:
+                parsed = _parse_yfinance_article(article)
+                if parsed is None:
+                    continue
+                title, url, pub_iso = parsed
+                try:
+                    pub_dt = datetime.fromisoformat(pub_iso.replace("Z", "+00:00")) if pub_iso else None
+                except (ValueError, AttributeError):
+                    pub_dt = None
+                if pub_dt is None or pub_dt < cutoff:
                     continue
                 hits.append(NewsHit(
                     ticker=ticker_str,
-                    headline=article.get("title", ""),
-                    url=article.get("link", ""),
+                    headline=title,
+                    url=url,
                     source="yfinance",
                     published_at=pub_dt.isoformat(),
                 ))
-        except Exception:
+        except Exception as exc:
+            logger.warning("yfinance news fetch failed for %s: %s", ticker_str, exc)
             continue
     return hits
 

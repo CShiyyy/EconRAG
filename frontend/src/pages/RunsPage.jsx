@@ -38,11 +38,12 @@ export default function RunsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 px-3 font-medium text-gray-600">Run ID</th>
-                  <th className="text-left py-2 px-3 font-medium text-gray-600">Type</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Date</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Started</th>
-                  <th className="text-left py-2 px-3 font-medium text-gray-600">Completed</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Status</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-600">Queued</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-600">Executed</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Run ID</th>
                 </tr>
               </thead>
               <tbody>
@@ -52,19 +53,20 @@ export default function RunsPage() {
                     onClick={() => navigate(`/runs/${run.run_id}`)}
                     className="border-b border-gray-50 cursor-pointer hover:bg-gray-50"
                   >
-                    <td className="py-2 px-3 font-medium text-primary">#{run.run_id}</td>
+                    <td className="py-2 px-3 font-medium text-gray-900">
+                      {run.session_date || run.timestamp?.slice(0, 10) || '—'}
+                    </td>
+                    <td className="py-2 px-3 text-gray-600">
+                      {run.timestamp ? run.timestamp.replace('T', ' ').slice(0, 19) + ' UTC' : '—'}
+                    </td>
                     <td className="py-2 px-3">
-                      <Badge variant={run.run_type === 'pre_open' ? 'blue' : 'gray'}>
-                        {run.run_type}
+                      <Badge variant={run.wall_clock_seconds != null ? 'green' : 'yellow'}>
+                        {run.wall_clock_seconds != null ? 'completed' : 'incomplete'}
                       </Badge>
                     </td>
-                    <td className="py-2 px-3 text-gray-600">{run.started_at || '—'}</td>
-                    <td className="py-2 px-3 text-gray-600">{run.completed_at || '—'}</td>
-                    <td className="py-2 px-3">
-                      <Badge variant={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'yellow'}>
-                        {run.status || 'unknown'}
-                      </Badge>
-                    </td>
+                    <td className="py-2 px-3 text-right text-gray-600">{run.queued_count ?? 0}</td>
+                    <td className="py-2 px-3 text-right text-gray-600">{run.executed_count ?? 0}</td>
+                    <td className="py-2 px-3 text-gray-400 text-xs">#{run.run_id}</td>
                   </tr>
                 ))}
               </tbody>

@@ -52,10 +52,22 @@
       "Bash(find:*)",
       "Bash(ls:*)",
       "Bash(/c/Users/shiyu/Documents/PersonalProjects/EconRAG/.venv/Scripts/python.exe -c \"import lightrag; print\\(lightrag.__version__\\); import lightrag.api\")",
-      "Bash(.venv/Scripts/python.exe -c \"from pipeline.config import LIGHTRAG_STORAGE_DIR; print\\(LIGHTRAG_STORAGE_DIR\\)\")"
+      "Bash(.venv/Scripts/python.exe -c \"from pipeline.config import LIGHTRAG_STORAGE_DIR; print\\(LIGHTRAG_STORAGE_DIR\\)\")",
+      "Bash(cp strategies/factors.py \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\factors.py\")",
+      "Bash(cp strategies/optimizer.py \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\optimizer.py\")",
+      "Bash(cp engine/monte_carlo.py \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\monte_carlo.py\")",
+      "Bash(cp engine/regime.py \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\regime.py\")",
+      "Bash(cp engine/deleverage.py \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\deleverage.py\")",
+      "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\engine\\\\portfolio_backtester.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\portfolio_backtester.py\")",
+      "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\engine\\\\backtester.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\backtester.py\")",
+      "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\strategies\\\\second_tower.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\strategy.py\")",
+      "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\data\\\\universes.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\universes.py\")",
+      "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\data\\\\sec_edgar_fetcher.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\sec_edgar_fetcher.py\")",
+      "mcp__miro__diagram_get_dsl",
+      "mcp__miro__diagram_create",
+      "mcp__miro__doc_create"
     ]
   },
-  "outputStyle": "default",
   "hooks": {
     "PostToolUse": [
       {
@@ -69,5 +81,6 @@
         ]
       }
     ]
-  }
+  },
+  "outputStyle": "default"
 }

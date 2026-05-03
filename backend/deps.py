@@ -29,13 +29,15 @@ def next_trigger_id() -> int:
     return next(_trigger_counter)
 
 
-def register_trigger(trigger_id: int) -> None:
+def register_trigger(trigger_id: int, session_date: str = "", run_type: str = "") -> None:
     RUN_STATUS[trigger_id] = {
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
         "run_id": None,
         "error": None,
+        "session_date": session_date,
+        "run_type": run_type,
     }
 
 

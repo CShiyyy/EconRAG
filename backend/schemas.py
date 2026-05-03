@@ -47,12 +47,14 @@ class PaginatedResponse(BaseModel):
 # --- Runs ---
 
 class TriggerRunRequest(BaseModel):
-    run_type: Literal["pre_open", "post_close"]
+    overwrite: bool = False
 
 
 class TriggerRunResponse(BaseModel):
     trigger_id: int
     status: str
+    session_date: str
+    run_type: str
 
 
 class TriggerStatusResponse(BaseModel):
@@ -60,6 +62,16 @@ class TriggerStatusResponse(BaseModel):
     status: str
     run_id: int | None = None
     error: str | None = None
+
+
+class SlotStatusResponse(BaseModel):
+    session_date: str
+    run_type: str
+    existing: bool
+    existing_run_id: int | None = None
+    trading_day: bool
+    market_phase: str
+    has_pending_queue: bool = False
 
 
 # --- Standing Events ---

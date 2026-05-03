@@ -16,11 +16,13 @@ from backend.deps import (
 )
 from backend.schemas import (
     PaginatedResponse,
+    SlotStatusResponse,
     TriggerRunRequest,
     TriggerRunResponse,
     TriggerStatusResponse,
 )
 from pipeline.config import DB_PATH, LIGHTRAG_STORAGE_DIR
+from pipeline.orchestration.clock import market_phase
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,11 @@ def list_runs(
     conn: sqlite3.Connection = Depends(get_db),
 ):
     rows = conn.execute(
-        "SELECT * FROM run_log ORDER BY run_id DESC LIMIT ? OFFSET ?",
+        """SELECT rl.*,
+               (SELECT COUNT(*) FROM trades WHERE queued_run_id = rl.run_id) AS queued_count,
+               (SELECT COUNT(*) FROM trades WHERE execution_run_id = rl.run_id) AS executed_count
+            FROM run_log rl
+            ORDER BY rl.run_id DESC LIMIT ? OFFSET ?""",
         (limit, skip),
     ).fetchall()
     total = conn.execute("SELECT COUNT(*) FROM run_log").fetchone()[0]
@@ -43,8 +49,31 @@ def list_runs(
         d = dict(row)
         if d.get("source_status"):
             d["source_status"] = json.loads(d["source_status"])
+        d.setdefault("started_at", d.get("timestamp"))
         items.append(d)
     return PaginatedResponse(items=items, total=total, skip=skip, limit=limit)
+
+
+# Must be defined before /runs/{run_id} so FastAPI matches static segment first
+@router.get("/runs/slot-status", response_model=SlotStatusResponse)
+def get_slot_status(conn: sqlite3.Connection = Depends(get_db)):
+    """Return current market phase and whether there are pending queued trades."""
+    from datetime import datetime, timezone
+    import pytz
+    et = pytz.timezone("America/New_York")
+    session_date = datetime.now(timezone.utc).astimezone(et).strftime("%Y-%m-%d")
+    phase = market_phase()
+    has_pending = conn.execute(
+        "SELECT 1 FROM trades WHERE status='queued' LIMIT 1"
+    ).fetchone() is not None
+    return SlotStatusResponse(
+        session_date=session_date,
+        run_type="scheduled",
+        existing=False,
+        trading_day=phase != "closed_day",
+        market_phase=phase,
+        has_pending_queue=has_pending,
+    )
 
 
 @router.get("/runs/{run_id}")
@@ -58,6 +87,7 @@ def get_run_detail(run_id: int, conn: sqlite3.Connection = Depends(get_db)):
     run_dict = dict(run)
     if run_dict.get("source_status"):
         run_dict["source_status"] = json.loads(run_dict["source_status"])
+    run_dict.setdefault("started_at", run_dict.get("timestamp"))
 
     # Agent outputs
     agent_rows = conn.execute(
@@ -97,11 +127,30 @@ def get_run_detail(run_id: int, conn: sqlite3.Connection = Depends(get_db)):
 
 
 @router.post("/runs/trigger", response_model=TriggerRunResponse)
-def trigger_run(body: TriggerRunRequest, background_tasks: BackgroundTasks):
+def trigger_run(
+    body: TriggerRunRequest,
+    background_tasks: BackgroundTasks,
+):
+    from datetime import datetime, timezone
+    import pytz
+    et = pytz.timezone("America/New_York")
+    session_date = datetime.now(timezone.utc).astimezone(et).strftime("%Y-%m-%d")
+
+    # Guard against concurrent in-flight trigger
+    for entry in RUN_STATUS.values():
+        if entry.get("status") == "running":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "run_in_progress"},
+            )
+
     trigger_id = next_trigger_id()
-    register_trigger(trigger_id)
-    background_tasks.add_task(_execute_pipeline, trigger_id, body.run_type)
-    return TriggerRunResponse(trigger_id=trigger_id, status="running")
+    register_trigger(trigger_id, session_date=session_date, run_type="scheduled")
+    background_tasks.add_task(_execute_pipeline, trigger_id, session_date)
+    return TriggerRunResponse(
+        trigger_id=trigger_id, status="running",
+        session_date=session_date, run_type="scheduled",
+    )
 
 
 @router.get("/runs/trigger/{trigger_id}/status", response_model=TriggerStatusResponse)
@@ -117,14 +166,14 @@ def get_trigger_status(trigger_id: int):
     )
 
 
-async def _execute_pipeline(trigger_id: int, run_type: str) -> None:
+async def _execute_pipeline(trigger_id: int, session_date: str) -> None:
     """Background task that runs the full pipeline."""
     try:
         from pipeline.orchestration.graph import run_pipeline
 
         result = await run_pipeline(
             db_path=str(DB_PATH),
-            run_type=run_type,
+            session_date=session_date,
             rag_storage_dir=str(LIGHTRAG_STORAGE_DIR),
         )
         run_id = result.get("run_id")

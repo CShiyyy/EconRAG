@@ -4,9 +4,10 @@ import Badge from '../components/shared/Badge';
 import EmptyState from '../components/shared/EmptyState';
 import AllocationChart from '../components/charts/AllocationChart';
 import LoadingSpinner from '../components/shared/LoadingSpinner';
+import TradesSection from '../components/trades/TradesSection';
 import { getPortfolio } from '../api/portfolio';
 import { getConstraints } from '../api/constraints';
-import { triggerRun, getTriggerStatus } from '../api/runs';
+import { triggerRun, getTriggerStatus, getSlotStatus } from '../api/runs';
 import { usePolling } from '../hooks/usePolling';
 
 function fmt(n) {
@@ -22,7 +23,7 @@ export default function DashboardPage() {
   const [constraints, setConstraints] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [runType, setRunType] = useState('pre_open');
+  const [slotStatus, setSlotStatus] = useState(null);
   const [triggerId, setTriggerId] = useState(null);
   const [triggerBusy, setTriggerBusy] = useState(false);
 
@@ -35,23 +36,31 @@ export default function DashboardPage() {
       if (pRes.status === 'fulfilled') {
         setPortfolio(pRes.value);
       } else if (pRes.reason?.name !== 'CanceledError' && pRes.reason?.name !== 'AbortError') {
-        console.error('getPortfolio failed', pRes.reason);
         setError('Failed to load portfolio data');
       }
       if (cRes.status === 'fulfilled') {
         setConstraints(cRes.value.constraints);
-      } else if (cRes.reason?.name !== 'CanceledError' && cRes.reason?.name !== 'AbortError') {
-        console.error('getConstraints failed', cRes.reason);
       }
       setLoading(false);
     });
   }, []);
 
+  const fetchSlotStatus = useCallback(() => {
+    getSlotStatus().then(setSlotStatus).catch(() => {});
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     fetchData({ signal: controller.signal });
+    fetchSlotStatus();
     return () => controller.abort();
-  }, [fetchData]);
+  }, [fetchData, fetchSlotStatus]);
+
+  // Poll slot-status every 60s so the banner stays current across ET time boundaries
+  useEffect(() => {
+    const id = setInterval(fetchSlotStatus, 60_000);
+    return () => clearInterval(id);
+  }, [fetchSlotStatus]);
 
   const pollFn = useCallback(
     () => (triggerId != null ? getTriggerStatus(triggerId) : Promise.resolve(null)),
@@ -62,14 +71,17 @@ export default function DashboardPage() {
   useEffect(() => {
     if (triggerData?.status === 'completed' || triggerData?.status === 'failed') {
       setTriggerBusy(false);
-      if (triggerData.status === 'completed') fetchData();
+      if (triggerData.status === 'completed') {
+        fetchData();
+        fetchSlotStatus();
+      }
     }
-  }, [triggerData, fetchData]);
+  }, [triggerData, fetchData, fetchSlotStatus]);
 
   const handleTrigger = async () => {
     setTriggerBusy(true);
     try {
-      const res = await triggerRun(runType);
+      const res = await triggerRun({});
       setTriggerId(res.trigger_id);
     } catch {
       setTriggerBusy(false);
@@ -77,6 +89,10 @@ export default function DashboardPage() {
   };
 
   if (loading) return <LoadingSpinner />;
+
+  const isClosedDay = slotStatus?.market_phase === 'closed_day';
+  const isMarketOpen = slotStatus?.market_phase === 'open';
+  const buttonLabel = triggerBusy ? 'Running...' : 'Trigger Run';
 
   const holdingsCount = portfolio?.holdings?.length || 0;
   const cashPct = portfolio?.total_value > 0 ? portfolio.cash / portfolio.total_value : 1;
@@ -88,23 +104,27 @@ export default function DashboardPage() {
           {error}
         </div>
       )}
+
+      {isMarketOpen && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800">
+          Market currently open — data is mid-session and will not reflect today's close.
+        </div>
+      )}
+      {isClosedDay && (
+        <div className="rounded-md bg-gray-50 border border-gray-200 px-4 py-3 text-sm text-gray-600">
+          Markets closed today — any trades queued now will execute at the next market open.
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">Dashboard</h1>
         <div className="flex items-center gap-2">
-          <select
-            value={runType}
-            onChange={(e) => setRunType(e.target.value)}
-            className="border border-gray-300 rounded px-2 py-1.5 text-sm"
-          >
-            <option value="pre_open">Pre-Open</option>
-            <option value="post_close">Post-Close</option>
-          </select>
           <button
             onClick={handleTrigger}
             disabled={triggerBusy}
             className="bg-primary text-white text-sm px-4 py-1.5 rounded hover:bg-primary-dark disabled:opacity-50 transition-colors"
           >
-            {triggerBusy ? 'Running...' : 'Trigger Run'}
+            {buttonLabel}
           </button>
           {triggerData && (
             <Badge variant={triggerData.status === 'completed' ? 'green' : triggerData.status === 'failed' ? 'red' : 'yellow'}>
@@ -177,6 +197,8 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      <TradesSection />
     </div>
   );
 }

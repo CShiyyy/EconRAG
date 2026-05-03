@@ -106,12 +106,13 @@ The database is the system's single source of truth. Use `PRAGMA journal_mode=WA
 - `recommendation_id` (PK), `run_id` (FK), `timestamp`, `ticker`, `action` (Hold/Buy/Trim/Exit/**assessment**), `conviction_scores` (JSON, see §4 Agent C output schema), `conviction_weight` (REAL, computed by Position Sizing Engine — `null` for assessment-mode entries), `rationale` (text), `key_quant_metrics` (JSON from Agent B, nullable on first run), `requery_triggered` (boolean), `requery_reason` (text, nullable).
 - Post-close assessment entries have `action: "assessment"` and `conviction_weight: null`. They record the system's end-of-day conviction state and serve as input context for the next pre-open decision run.
 
-**`trades`** — Simulated execution log, referencing the recommendation that triggered it. Only produced by pre-open runs.
-- `trade_id` (PK), `recommendation_id` (FK), `ticker`, `action`, `shares`, `simulated_fill_price`, `fill_type` (open_price), `gap_pct` (REAL, nullable — percentage gap between previous close and fill price, for future analysis), `slippage_applied` (REAL, default 0.0 — configurable for future realism), `realized_pnl` (REAL, nullable — populated on Trim/Exit trades: `(fill_price - cost_basis) × shares`), `timestamp`.
-- Separated from recommendations to support future features: vetoes, position limits, cooldown periods, manual overrides.
+**`trades`** — Simulated trade lifecycle table. Each trade is queued by one run and executed by the next.
+- `trade_id` (PK), `recommendation_id` (FK), `ticker`, `action`, `shares`, `fill_type`, `gap_pct` (REAL, nullable), `slippage_applied` (REAL, default 0.0), `realized_pnl` (REAL, nullable — on Trim/Exit: `(fill_price - cost_basis) × shares`), `timestamp`.
+- **Status columns:** `status` (queued / executed / overwritten), `queued_at`, `queued_run_id` (FK), `executed_at` (nullable), `execution_run_id` (FK, nullable), `execution_fill_price` (REAL, nullable), `target_close_at` (nullable).
+- Trade lifecycle: a run calls `queue_trades()` → status `queued`. The *next* run calls `execute_queued_batch()` first, filling price and updating `holdings`. If a run triggers before prior queued trades are executed, `mark_overwritten()` sets them to `overwritten`.
 
 **`run_log`** — One row per system run. Diagnostic metadata.
-- `run_id` (PK), `timestamp`, `run_type` (pre_open / post_close / non_trading_day), `is_first_run` (boolean), `source_status` (JSON: per-source success/failure), `requery_triggered` (boolean), `requery_reason` (text, nullable), `wall_clock_seconds`.
+- `run_id` (PK), `timestamp`, `run_type` (always `"scheduled"`), `session_date`, `is_first_run` (boolean), `source_status` (JSON: per-source success/failure), `requery_triggered` (boolean), `requery_reason` (text, nullable), `wall_clock_seconds`.
 
 **`agent_outputs`** — Raw Agent A, Agent B, and Agent C outputs, keyed to run.
 - `output_id` (PK), `run_id` (FK), `agent` (A/B/C), `output_blob` (text/JSON).
@@ -132,7 +133,17 @@ The database is the system's single source of truth. Use `PRAGMA journal_mode=WA
 - Written by the profile seeder after successful extract→validate→insert. Never overwritten except via `INSERT OR REPLACE` (reseed).
 - Exposed by `GET /api/profiles` and `GET /api/profiles/{key}`.
 
-**Total: 13 tables** (`account`, `watchlist`, `constraints`, `holdings`, `computed_targets`, `snapshots`, `recommendations`, `trades`, `run_log`, `agent_outputs`, `canonical_entities`, `standing_events`, `kg_seed_log`).
+**`market_history_cache`** — Multi-year OHLCV price history for Agent B / Second Tower factor computation.
+- `ticker` + `date` (PK composite), `open`, `high`, `low`, `close`, `volume` (REAL).
+- Populated and incrementally refreshed by `pipeline/ingestion/market_history.py` (`refresh_ohlcv_cache`). Covers a ~3-year lookback window per ticker plus SPY as market benchmark.
+- Read by `load_ohlcv_cache()` in `pipeline/db/helpers.py`.
+
+**`edgar_filings_cache`** — SEC EDGAR 10-K fundamental statement data for Second Tower quality/value factors.
+- `ticker` + `statement_type` (PK composite), `payload_json` (JSON-serialised DataFrame), `cached_at` (timestamp).
+- Populated by `pipeline/ingestion/edgar.py` (`refresh_edgar_cache`). Statement types: `income_statement`, `balance_sheet`, `cash_flow`.
+- Read by `load_edgar_cache()` in `pipeline/db/helpers.py`.
+
+**Total: 15 tables** (`account`, `watchlist`, `constraints`, `holdings`, `computed_targets`, `snapshots`, `recommendations`, `trades`, `run_log`, `agent_outputs`, `canonical_entities`, `standing_events`, `kg_seed_log`, `market_history_cache`, `edgar_filings_cache`).
 
 ### 2.2 Qualitative Store — LightRAG (Local)
 
@@ -331,11 +342,13 @@ On re-query, Agent A re-runs with a **targeted query** (specific ticker + expand
 - Output length scales with portfolio size — one entry per tracked ticker plus macro overview.
 - **Re-query mode:** When triggered, runs a single targeted query for the flagged ticker(s) with broadened search terms. Updates only the affected ticker entries in the output.
 
-### Agent B: The Quant Analyst (Local Script)
+### Agent B: The Quant Analyst (Local Script — Second Tower v0.2)
 - **Model:** Deterministic Python code (no LLM).
+- **Implementation:** `pipeline/agents/agent_b.py` — a shim over the **Second Tower** strategy engine in `pipeline/agents/second_tower/`. Second Tower computes target weights using 63 cross-sectional factors (Momentum/Value/Quality/Technical/Risk/Accruals), Ledoit-Wolf shrinkage covariance, and CVXPY mean-variance optimization with walk-forward backtesting. The shim loads data from the SQLite OHLCV and EDGAR caches, calls `_compute_rebal_weights` for the latest date (single-date live mode), and converts the resulting weight vector into the per-ticker output dict that Agent C and `conditions.py` expect. The archived v0.1 deterministic health-checker lives in `pipeline/agents/archive/agent_b_v0_1.py`.
+- **Data dependencies:** `market_history_cache` (~3-year OHLCV per ticker + SPY, refreshed by `pipeline/ingestion/market_history.py`) and `edgar_filings_cache` (SEC 10-K statements, refreshed by `pipeline/ingestion/edgar.py`).
 - **Skipped on first run** (`is_first_run == true`). On the first run, the portfolio is pure cash and there are no previous computed targets to measure drift against. Agent B's output in the state object is set to `null`, and Agent C operates on Agent A's context alone.
-- **Role (all subsequent runs):** Calculates portfolio drift from the **most recent `computed_targets`** row, per-ticker and portfolio-level volatility, sector/factor exposure concentrations (checked against `constraints` table), and drawdown metrics.
-- **Graph Injection:** After computing metrics, writes `CORRELATED_WITH` edges into LightRAG's NetworkX graph (tagged `source: "agent_b"`). Overwrites previous run's correlation edges. This gives Agent A access to quantitative relationships alongside narrative ones.
+- **Role (all subsequent runs):** Computes Second Tower target weights, per-ticker drift against the most recent `computed_targets` row, 30-day rolling volatility, sector concentrations, constraint violations, and portfolio drawdown.
+- **Graph Injection:** After computing metrics, writes `CORRELATED_WITH` edges into LightRAG's NetworkX graph (tagged `source: "agent_b"`), derived from the Ledoit-Wolf covariance matrix. Overwrites previous run's correlation edges. This gives Agent A access to quantitative relationships alongside narrative ones.
 - **Output Schema (Structured JSON):**
 ```json
 {
@@ -518,10 +531,10 @@ The two daily runs serve fundamentally different roles:
 - Pre-open is the system's action step. It incorporates overnight developments, references the previous post-close assessment as additional context, and produces concrete trade decisions that execute at that day's open.
 - **Gap tracking:** Each trade logs `gap_pct` — the percentage difference between the previous close and the fill price. Stored for future analysis of whether large gaps correlate with poor recommendation quality.
 - **Slippage:** A configurable `slippage_applied` field (default 0.0) is stored on every trade. Placeholder for future realism.
-- **Market Calendar:** Before executing, the scheduler checks whether today is a trading day (via `exchange_calendars` package). On weekends and holidays, the run is skipped entirely (or runs ingestion-only to keep the graph fresh, logging `run_type: non_trading_day`).
+- **Market Calendar:** `market_phase()` (via `exchange_calendars`) returns `"closed_day"` on weekends and holidays. Runs are still allowed on closed days — sizing uses the prior session's `previous_close` price, and `target_close_at` is set to the next open-session close via `next_close()`. The Dashboard shows an info banner on closed days noting that queued trades will execute at the next market open. `execute_pending_node` gracefully no-ops if no trades predate the last session close.
 
 ### Standard Run (Both Run Types)
-1. **Trigger:** APScheduler fires at configured time. Market calendar check — skip if not a trading day. *(Scheduler and market calendar not yet implemented — runs are triggered manually or via API.)*
+1. **Trigger:** APScheduler fires at configured time. *(Scheduler not yet implemented — runs are triggered manually or via API.)* Runs are allowed on closed days; the pipeline queues trades for the next open session.
 2. **Snapshot:** Record current portfolio state to `snapshots` table. On post-close runs, revalue all positions at closing price.
 3. **Ingest:** Scrapers gather data from all sources for the watchlist universe; per-source health is logged. Crawl4AI cleans raw content.
 4. **Extract & Resolve:** LightRAG's custom extraction prompt (constrained to closed ontology) runs on cleaned chunks via Gemma 4 E4B. Raw entities are resolved through the Canonical Registry. Post-extraction validator enforces type compliance and attaches temporal metadata.

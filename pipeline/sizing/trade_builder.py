@@ -1,7 +1,9 @@
 """Trade list computation and cost basis accounting.
 
-Computes the concrete share deltas between current holdings and target weights,
-handles cost basis via weighted average method, and stores computed targets.
+Computes the concrete share deltas between current holdings and target weights.
+Trade actions are derived from the delta:
+  - Ticker in target_weights: Buy (delta > 0) or Trim (delta < 0)
+  - Held ticker not in target_weights: full Exit (raw_score was ≤ 0)
 """
 
 import json
@@ -25,7 +27,7 @@ def compute_trade_list(
         current_holdings: {ticker: {shares, cost_basis_per_share, sector}}.
         total_value: Current total portfolio value.
         fill_prices: {ticker: expected_fill_price}.
-        actions: {ticker: action} from Agent C (Buy/Hold/Trim/Exit).
+        actions: {ticker: action} from Agent C (retained for UX labels only).
         cash_floor: Minimum cash fraction.
         cash_balance: Current cash balance.
 
@@ -37,19 +39,17 @@ def compute_trade_list(
     """
     trades: list[dict] = []
 
-    # Process Buy/Hold tickers (from target weights)
+    # Tickers with a target weight: size by delta vs current holding.
     for ticker, target_weight in target_weights.items():
-        action = actions.get(ticker, "Hold")
+        fill_price = fill_prices.get(ticker, 0.0)
+        if fill_price <= 0:
+            continue
+
         target_dollars = target_weight * total_value
-        fill_price = fill_prices[ticker]
-
         current = current_holdings.get(ticker)
-        current_dollars = 0.0
-        if current:
-            current_dollars = current["shares"] * fill_price
-
+        current_dollars = current["shares"] * fill_price if current else 0.0
         delta_dollars = target_dollars - current_dollars
-        delta_shares = delta_dollars / fill_price if fill_price > 0 else 0.0
+        delta_shares = delta_dollars / fill_price
 
         if abs(delta_shares) < 0.001:
             continue
@@ -62,35 +62,23 @@ def compute_trade_list(
             "fill_price": fill_price,
         })
 
-    # Process Trim tickers not in target weights (partial reduce)
-    for ticker, action in actions.items():
-        if action == "Trim" and ticker not in target_weights:
-            current = current_holdings.get(ticker)
-            if current and current["shares"] > 0:
-                fill_price = fill_prices[ticker]
-                trades.append({
-                    "ticker": ticker,
-                    "action": "Trim",
-                    "shares": current["shares"],
-                    "dollar_amount": current["shares"] * fill_price,
-                    "fill_price": fill_price,
-                })
+    # Held tickers not in target_weights: full liquidation.
+    # This covers any holding whose raw_score was ≤ 0 (Agent B / Agent A signal gone).
+    for ticker, holding in current_holdings.items():
+        if ticker in target_weights or holding["shares"] <= 0:
+            continue
+        fill_price = fill_prices.get(ticker, 0.0)
+        if fill_price <= 0:
+            continue
+        trades.append({
+            "ticker": ticker,
+            "action": "Exit",
+            "shares": holding["shares"],
+            "dollar_amount": holding["shares"] * fill_price,
+            "fill_price": fill_price,
+        })
 
-    # Process Exit tickers (full liquidation)
-    for ticker, action in actions.items():
-        if action == "Exit":
-            current = current_holdings.get(ticker)
-            if current and current["shares"] > 0:
-                fill_price = fill_prices[ticker]
-                trades.append({
-                    "ticker": ticker,
-                    "action": "Exit",
-                    "shares": current["shares"],
-                    "dollar_amount": current["shares"] * fill_price,
-                    "fill_price": fill_price,
-                })
-
-    # Verify cash floor
+    # Verify cash floor.
     net_cash_change = sum(
         t["dollar_amount"] if t["action"] in ("Trim", "Exit") else -t["dollar_amount"]
         for t in trades
@@ -98,7 +86,7 @@ def compute_trade_list(
     projected_cash = cash_balance + net_cash_change
     min_cash = cash_floor * total_value
 
-    if projected_cash < min_cash - 0.01:  # small tolerance for float math
+    if projected_cash < min_cash - 0.01:
         raise ValueError(
             f"Trades would violate cash floor: projected cash ${projected_cash:.2f} "
             f"< minimum ${min_cash:.2f}"
@@ -135,14 +123,12 @@ def update_cost_basis(
 
     if action == "Buy":
         if row is None:
-            # New position
             conn.execute(
                 "INSERT INTO holdings (ticker, shares, cost_basis_per_share, sector) "
                 "VALUES (?, ?, ?, ?)",
                 (ticker, shares, fill_price, sector),
             )
         else:
-            # Add to existing — weighted average cost basis
             old_shares = row["shares"]
             old_basis = row["cost_basis_per_share"]
             new_total = old_shares + shares
@@ -160,11 +146,9 @@ def update_cost_basis(
         cost_basis = row["cost_basis_per_share"]
         remaining = old_shares - shares
         if remaining < 0.001:
-            # Effectively an exit
             conn.execute("DELETE FROM holdings WHERE ticker = ?", (ticker,))
             return (fill_price - cost_basis) * old_shares
         else:
-            # Cost basis unchanged on trim
             conn.execute(
                 "UPDATE holdings SET shares = ? WHERE ticker = ?",
                 (remaining, ticker),
@@ -183,21 +167,39 @@ def update_cost_basis(
         raise ValueError(f"Unknown action: {action}")
 
 
+def apply_trade(
+    conn: sqlite3.Connection,
+    ticker: str,
+    action: str,
+    shares: float,
+    fill_price: float,
+    sector: str = "",
+) -> float | None:
+    """Apply a single trade: update holdings/cost-basis and adjust cash balance atomically.
+
+    Returns realized P&L for Trim/Exit, None for Buy. Does not commit.
+    """
+    realized_pnl = update_cost_basis(conn, ticker, action, shares, fill_price, sector)
+    dollar_amount = shares * fill_price
+    if action in ("Trim", "Exit"):
+        conn.execute(
+            "UPDATE account SET cash_balance = cash_balance + ? WHERE account_id = 1",
+            (dollar_amount,),
+        )
+    else:
+        conn.execute(
+            "UPDATE account SET cash_balance = cash_balance - ? WHERE account_id = 1",
+            (dollar_amount,),
+        )
+    return realized_pnl
+
+
 def store_computed_targets(
     conn: sqlite3.Connection,
     run_id: int,
     per_ticker_data: dict,
 ) -> int:
-    """Store target allocation to computed_targets table.
-
-    Args:
-        conn: SQLite connection.
-        run_id: Run ID to associate with.
-        per_ticker_data: {ticker: {target_weight, conviction_weight, action}}.
-
-    Returns:
-        The target_id of the inserted row.
-    """
+    """Store target allocation to computed_targets table."""
     timestamp = datetime.now(timezone.utc).isoformat()
     cursor = conn.execute(
         "INSERT INTO computed_targets (run_id, timestamp, per_ticker_json) VALUES (?, ?, ?)",

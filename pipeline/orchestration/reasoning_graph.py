@@ -1,7 +1,7 @@
 """Agent Reasoning Subgraph — agent_a -> agent_b -> requery_check -> agent_c.
 
-Conditional edges handle first-run skip (agent_b skipped) and re-query loop
-(max 1 re-query per run).
+Conditional edges handle re-query loop (max 1 re-query per run, disabled on
+first run). Agent B runs on every run including first run.
 """
 
 from __future__ import annotations
@@ -67,6 +67,11 @@ async def requery_check_node(state: PipelineState) -> dict:
     """Evaluate whether re-query is needed based on agent outputs."""
     from pipeline.orchestration.conditions import evaluate_requery
 
+    # Re-query disabled on first run (no prior baseline to compare against)
+    if state.get("is_first_run", False):
+        logger.info("First run — re-query disabled")
+        return {"flagged_tickers": [], "requery_reason": None}
+
     requery_count = state.get("requery_count", 0)
 
     # If already re-queried, don't do it again
@@ -119,9 +124,7 @@ async def agent_c_node(state: PipelineState) -> dict:
 
 
 def _route_after_agent_a(state: PipelineState) -> str:
-    """Route after Agent A: skip to agent_c on first run or re-query pass."""
-    if state.get("is_first_run", False):
-        return "agent_c"
+    """Route after Agent A: always run agent_b, except on a re-query pass."""
     if state.get("requery_count", 0) > 0:
         return "agent_c"
     return "agent_b"

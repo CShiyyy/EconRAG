@@ -29,7 +29,6 @@ from pipeline.config import (
     PROFILE_SEED_ENABLED,
     PROFILE_SEED_TTL_HOURS,
 )
-from pipeline.knowledge.extraction import extract_from_markdown
 from pipeline.knowledge.graph_ops import insert_validated_data
 from pipeline.knowledge.profile_grounding import (
     MacroFactPack,
@@ -322,6 +321,186 @@ def _build_macro_messages(fact_pack: MacroFactPack) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic structural data builders (bypass Ollama extraction)
+# ---------------------------------------------------------------------------
+
+def _sector_canonical_id(sector: str) -> str:
+    """Convert a GICS sector display name to its canonical ID (matches db/init.py logic)."""
+    return "sector:" + sector.lower().replace(" ", "_").replace("&", "and")
+
+
+def _person_canonical_id(name: str) -> str:
+    """Convert a person's display name to canonical ID format person:<snake_case>."""
+    return "person:" + name.lower().replace(" ", "_").replace("-", "_").replace(".", "")
+
+
+def _build_ticker_structural_data(fact_pack: TickerFactPack) -> dict:
+    """Build deterministic extraction dict from a TickerFactPack.
+
+    Returns a dict in the same format as extract_from_markdown() output so it
+    can be passed directly to validate_extraction(). Bypasses the Ollama model
+    entirely for profile seeding — guarantees correct entity_name / src_entity
+    / tgt_entity string alignment (the main cause of silent relationship drops
+    in the validator).
+
+    Produces:
+    - COMPANY entity for the ticker itself
+    - SECTOR entity + BELONGS_TO_SECTOR edge
+    - PERSON entity + LED_BY edge (if ceo_name known)
+    - COMPANY entities + COMPETES_WITH edges (for each watchlist peer)
+    """
+    ticker = fact_pack.ticker
+    sector_display = fact_pack.sector
+
+    entities: list[dict] = [
+        {
+            "entity_name": ticker,
+            "entity_type": "COMPANY",
+            "proposed_canonical_id": ticker,
+            "description": fact_pack.company_name,
+        },
+        {
+            "entity_name": sector_display,
+            "entity_type": "SECTOR",
+            "proposed_canonical_id": _sector_canonical_id(sector_display),
+            "description": f"GICS sector: {sector_display}",
+        },
+    ]
+
+    relationships: list[dict] = [
+        {
+            "src_entity": ticker,
+            "tgt_entity": sector_display,
+            "relationship_type": "BELONGS_TO_SECTOR",
+            "description": f"{ticker} is classified in the {sector_display} sector",
+            "significance_score": 1.0,
+            "attributes": {},
+        },
+    ]
+
+    # CEO / LED_BY
+    if fact_pack.ceo_name:
+        entities.append({
+            "entity_name": fact_pack.ceo_name,
+            "entity_type": "PERSON",
+            "proposed_canonical_id": _person_canonical_id(fact_pack.ceo_name),
+            "description": f"CEO of {ticker}",
+        })
+        relationships.append({
+            "src_entity": ticker,
+            "tgt_entity": fact_pack.ceo_name,
+            "relationship_type": "LED_BY",
+            "description": f"{ticker} is led by {fact_pack.ceo_name}",
+            "significance_score": 1.0,
+            "attributes": {},
+        })
+
+    # Competitor COMPETES_WITH edges
+    for peer in fact_pack.peer_tickers:
+        entities.append({
+            "entity_name": peer,
+            "entity_type": "COMPANY",
+            "proposed_canonical_id": peer,
+            "description": f"Peer company of {ticker}",
+        })
+        relationships.append({
+            "src_entity": ticker,
+            "tgt_entity": peer,
+            "relationship_type": "COMPETES_WITH",
+            "description": f"{ticker} competes with {peer}",
+            "significance_score": 0.7,
+            "attributes": {},
+        })
+
+    return {"entities": entities, "relationships": relationships}
+
+
+# Fixed macro entities — always present regardless of live data availability
+_MACRO_FIXED_ENTITIES: list[dict] = [
+    {
+        "entity_name": "the Federal Reserve",
+        "entity_type": "INSTITUTION",
+        "proposed_canonical_id": "inst:federal_reserve",
+        "description": "US central bank responsible for monetary policy",
+    },
+    {
+        "entity_name": "S&P 500",
+        "entity_type": "INDEX",
+        "proposed_canonical_id": "index:SPX",
+        "description": "S&P 500 large-cap US equity index",
+    },
+]
+
+# Macro themes to include when their keywords are detected in headlines
+_MACRO_THEME_TRIGGERS: list[tuple[frozenset[str], dict]] = [
+    (
+        frozenset({"ai", "artificial intelligence", "capex", "data center", "gpu", "semiconductor"}),
+        {
+            "entity_name": "AI capital expenditure cycle",
+            "entity_type": "MACRO_THEME",
+            "proposed_canonical_id": "theme:ai_capex_cycle",
+            "description": "Multi-year surge in AI infrastructure spending driving semiconductor and data centre demand",
+        },
+    ),
+    (
+        frozenset({"china", "tariff", "export restriction", "trade"}),
+        {
+            "entity_name": "China export restriction risks",
+            "entity_type": "MACRO_THEME",
+            "proposed_canonical_id": "theme:china_export_restrictions",
+            "description": "Geopolitical risk from US export controls on advanced semiconductors targeting China",
+        },
+    ),
+    (
+        frozenset({"reshoring", "tariff", "manufacturing", "supply chain"}),
+        {
+            "entity_name": "reshoring and tariff policy",
+            "entity_type": "MACRO_THEME",
+            "proposed_canonical_id": "theme:reshoring_tariff_policy",
+            "description": "Policy-driven shift to domestic manufacturing and cross-border tariff impacts",
+        },
+    ),
+]
+
+
+def _build_macro_structural_data(fact_pack: MacroFactPack) -> dict:
+    """Build deterministic extraction dict from a MacroFactPack.
+
+    Includes fixed institutional entities (Federal Reserve, S&P 500) and
+    conditionally adds macro themes detected in macro_headlines.
+    """
+    entities: list[dict] = list(_MACRO_FIXED_ENTITIES)
+    relationships: list[dict] = []
+
+    # Add SEC if we have any sector performance data (regulatory presence)
+    if fact_pack.sector_performance:
+        entities.append({
+            "entity_name": "the SEC",
+            "entity_type": "INSTITUTION",
+            "proposed_canonical_id": "inst:sec",
+            "description": "US Securities and Exchange Commission",
+        })
+
+    # Detect macro themes from headlines
+    all_headline_text = " ".join(fact_pack.macro_headlines).lower()
+    for keywords, theme_entity in _MACRO_THEME_TRIGGERS:
+        if any(kw in all_headline_text for kw in keywords):
+            entities.append(theme_entity)
+
+    # POLICY_AFFECTS: Federal Reserve -> S&P 500 (always meaningful)
+    relationships.append({
+        "src_entity": "the Federal Reserve",
+        "tgt_entity": "S&P 500",
+        "relationship_type": "POLICY_AFFECTS",
+        "description": "Federal Reserve monetary policy affects broad equity market conditions",
+        "significance_score": 0.8,
+        "attributes": {},
+    })
+
+    return {"entities": entities, "relationships": relationships}
+
+
+# ---------------------------------------------------------------------------
 # Core helpers
 # ---------------------------------------------------------------------------
 
@@ -343,29 +522,36 @@ async def _seed_single(
     messages: list[dict],
     source_id: str,
     run_id: int,
+    structural_data: dict | None = None,
 ) -> bool:
-    """Generate, extract, validate, and insert one profile. Write kg_seed_log on success.
+    """Generate profile prose, build KG edges, and insert into LightRAG.
 
     Steps:
-    1. Cloud LLM generates markdown profile text.
-    2. Local Ollama extractor parses entities/relationships from the markdown.
-    3. Validator canonicalises results; Tier 2 edges receive extended TTL.
-    4. insert_validated_data writes the result into LightRAG.
-    5. kg_seed_log row is written only if all prior steps succeeded.
+    1. Cloud LLM generates natural-language markdown profile (stored in LightRAG
+       for Agent A retrieval regardless of KG edge outcome).
+    2. If structural_data is provided, use it directly for KG edges (bypasses
+       Ollama). Otherwise fall back to Ollama extraction (used for news/social).
+    3. Validator canonicalises entities/relationships.
+    4. insert_validated_data writes prose + edges into LightRAG.
+    5. kg_seed_log row is written only on full success.
 
     Returns True on success, False on any failure.
     """
-    # Stage 1: LLM generation
+    # Stage 1: LLM generation — always run to produce retrievable prose
     markdown = await _generate_profile(client, messages)
     if not markdown or not markdown.strip():
         logger.warning("Empty profile from cloud LLM for %s:%s", seed_type, seed_key)
         return False
 
-    # Stage 2: Local extraction
-    raw_extraction = await extract_from_markdown(markdown)
-    if raw_extraction is None:
-        logger.warning("Ollama extraction failed for profile %s:%s", seed_type, seed_key)
-        return False
+    # Stage 2: Determine raw extraction source
+    if structural_data is not None:
+        raw_extraction = structural_data
+    else:
+        from pipeline.knowledge.extraction import extract_from_markdown
+        raw_extraction = await extract_from_markdown(markdown)
+        if raw_extraction is None:
+            logger.warning("Ollama extraction failed for profile %s:%s", seed_type, seed_key)
+            return False
 
     # Stage 3: Validate and canonicalise with extended TTL for Tier 2 edges
     validation = validate_extraction(
@@ -384,12 +570,12 @@ async def _seed_single(
 
     if not validation.entities and not validation.relationships:
         logger.warning(
-            "No valid entities/relationships extracted from profile %s:%s — skipping KG insert",
+            "No valid entities/relationships from profile %s:%s — skipping KG insert",
             seed_type, seed_key,
         )
         return False
 
-    # Stage 4: Insert into LightRAG
+    # Stage 4: Insert into LightRAG (prose stored as source_text; edges as graph nodes)
     await insert_validated_data(rag, validation, markdown, source_id)
 
     # Stage 5: Record in seed log (only reached on full success)
@@ -484,6 +670,7 @@ async def seed_missing_profiles(
                     messages=_build_ticker_messages(fact_pack),
                     source_id=f"profile:{ticker}",
                     run_id=run_id,
+                    structural_data=_build_ticker_structural_data(fact_pack),
                 )
                 if ok:
                     result.tickers_seeded.append(ticker)
@@ -513,6 +700,7 @@ async def seed_missing_profiles(
                 messages=_build_macro_messages(macro_pack),
                 source_id="profile:macro",
                 run_id=run_id,
+                structural_data=_build_macro_structural_data(macro_pack),
             )
             if ok:
                 result.macro_seeded = True

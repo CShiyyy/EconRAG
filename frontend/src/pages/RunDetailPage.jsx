@@ -5,12 +5,11 @@ import Badge from '../components/shared/Badge';
 import JsonViewer from '../components/shared/JsonViewer';
 import ConvictionScores from '../components/conviction/ConvictionScores';
 import { getRunDetail } from '../api/runs';
+import { ACTION_VARIANT, TRADE_STATUS_VARIANT } from '../lib/badgeVariants';
 
 function fmt(n) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 }
-
-const ACTION_VARIANT = { Buy: 'green', Hold: 'blue', Trim: 'yellow', Exit: 'red', assessment: 'gray' };
 
 export default function RunDetailPage() {
   const { runId } = useParams();
@@ -32,27 +31,33 @@ export default function RunDetailPage() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Link to="/runs" className="text-primary text-sm hover:underline">&larr; Back</Link>
-        <h1 className="text-xl font-bold text-gray-900">Run #{run.run_id}</h1>
-        <Badge variant={run.run_type === 'pre_open' ? 'blue' : 'gray'}>{run.run_type}</Badge>
-        <Badge variant={run.status === 'completed' ? 'green' : run.status === 'failed' ? 'red' : 'yellow'}>
-          {run.status || 'unknown'}
+        <h1 className="text-xl font-bold text-gray-900">
+          Run{run.session_date ? ` | ${run.session_date}` : ''}
+          <span className="text-gray-400 font-normal text-base ml-2">#{run.run_id}</span>
+        </h1>
+        <Badge variant={run.wall_clock_seconds != null ? 'green' : 'yellow'}>
+          {run.wall_clock_seconds != null ? 'completed' : 'incomplete'}
         </Badge>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white rounded-lg border border-gray-200 p-3">
           <p className="text-xs text-muted">Started</p>
-          <p className="text-sm font-medium">{run.started_at || '—'}</p>
+          <p className="text-sm font-medium">
+            {run.timestamp ? run.timestamp.replace('T', ' ').slice(0, 19) + ' UTC' : '—'}
+          </p>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-3">
-          <p className="text-xs text-muted">Completed</p>
-          <p className="text-sm font-medium">{run.completed_at || '—'}</p>
+          <p className="text-xs text-muted">Wall Clock</p>
+          <p className="text-sm font-medium">
+            {run.wall_clock_seconds != null ? `${run.wall_clock_seconds.toFixed(1)}s` : '—'}
+          </p>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-3">
           <p className="text-xs text-muted">Re-query</p>
-          <p className="text-sm font-medium">{run.requery_count ?? 0} time(s)</p>
+          <p className="text-sm font-medium">{run.requery_triggered ? '1 time' : 'None'}</p>
         </div>
       </div>
 
@@ -125,9 +130,10 @@ export default function RunDetailPage() {
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Ticker</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Action</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Status</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-600">Shares</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-600">Fill Price</th>
-                  <th className="text-right py-2 px-3 font-medium text-gray-600">Realized P&L</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Exec Run</th>
                 </tr>
               </thead>
               <tbody>
@@ -135,10 +141,17 @@ export default function RunDetailPage() {
                   <tr key={t.trade_id} className="border-b border-gray-50">
                     <td className="py-2 px-3 font-medium text-gray-900">{t.ticker}</td>
                     <td className="py-2 px-3"><Badge variant={ACTION_VARIANT[t.action] || 'gray'}>{t.action}</Badge></td>
+                    <td className="py-2 px-3"><Badge variant={TRADE_STATUS_VARIANT[t.status] || 'gray'}>{t.status}</Badge></td>
                     <td className="py-2 px-3 text-right text-gray-700">{t.shares}</td>
-                    <td className="py-2 px-3 text-right text-gray-700">{fmt(t.simulated_fill_price)}</td>
                     <td className="py-2 px-3 text-right text-gray-700">
-                      {t.realized_pnl != null ? fmt(t.realized_pnl) : '—'}
+                      {t.execution_fill_price != null ? fmt(t.execution_fill_price) : '—'}
+                    </td>
+                    <td className="py-2 px-3 text-gray-400 text-xs">
+                      {t.execution_run_id != null ? (
+                        <Link to={`/runs/${t.execution_run_id}`} className="text-primary hover:underline">
+                          #{t.execution_run_id}
+                        </Link>
+                      ) : '—'}
                     </td>
                   </tr>
                 ))}
