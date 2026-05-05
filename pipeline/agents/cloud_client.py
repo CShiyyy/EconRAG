@@ -25,6 +25,7 @@ from pipeline.config import (
     GEMINI_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,11 +178,13 @@ class OllamaClient:
         model_name: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> None:
         self._base_url = base_url or OLLAMA_BASE_URL
         self._model_name = model_name or OLLAMA_MODEL
         self._temperature = temperature if temperature is not None else CLOUD_TEMPERATURE
         self._max_tokens = max_tokens if max_tokens is not None else CLOUD_MAX_TOKENS
+        self._num_ctx = num_ctx if num_ctx is not None else OLLAMA_NUM_CTX
 
     async def generate(
         self,
@@ -197,6 +200,7 @@ class OllamaClient:
             "options": {
                 "temperature": self._temperature,
                 "num_predict": self._max_tokens,
+                "num_ctx": self._num_ctx,
             },
         }
         if response_schema is not None:

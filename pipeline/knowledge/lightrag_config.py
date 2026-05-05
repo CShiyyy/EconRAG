@@ -17,6 +17,7 @@ from pipeline.config import (
     OLLAMA_EMBED_DIM,
     OLLAMA_EMBED_MODEL,
     OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
 )
 
 
@@ -41,7 +42,7 @@ async def get_rag_instance(working_dir: Path | None = None) -> LightRAG:
         llm_model_name=OLLAMA_MODEL,
         llm_model_kwargs={
             "host": OLLAMA_BASE_URL,
-            "options": {"num_ctx": 8192},
+            "options": {"num_ctx": OLLAMA_NUM_CTX},
             "timeout": 300,
         },
         embedding_func=EmbeddingFunc(

@@ -59,6 +59,63 @@ _FACTOR_CATEGORIES: dict[str, list[str]] = {
 }
 
 
+# Inverse map: factor name → category (built from _FACTOR_CATEGORIES)
+_FACTOR_TO_CATEGORY: dict[str, str] = {
+    f: cat for cat, factors in _FACTOR_CATEGORIES.items() for f in factors
+}
+
+
+def _per_ticker_factor_decomposition(
+    factor_z: pd.DataFrame,
+    composite: pd.Series,
+    valid_tickers: list[str],
+    top_n: int = 5,
+) -> dict[str, dict]:
+    """Build per-ticker factor decomposition: top-N drivers by |z|, category scores, composite.
+
+    factor_z columns may include any subset of the 63 factor names. Tickers not in
+    factor_z (e.g., insufficient data) get an empty entry so callers can render
+    'no factor data' uniformly.
+    """
+    out: dict[str, dict] = {}
+    available_factors = list(factor_z.columns)
+    cat_to_present: dict[str, list[str]] = {}
+    for cat, cols in _FACTOR_CATEGORIES.items():
+        present = [c for c in cols if c in available_factors]
+        if present:
+            cat_to_present[cat] = present
+
+    for ticker in valid_tickers:
+        if ticker not in factor_z.index:
+            out[ticker] = {"top_factors": [], "category_scores": {}, "composite_signal": 0.0}
+            continue
+        row = factor_z.loc[ticker]
+        ranked = sorted(
+            ((f, float(row[f])) for f in available_factors),
+            key=lambda kv: abs(kv[1]),
+            reverse=True,
+        )
+        top_factors = [
+            {
+                "factor": f,
+                "category": _FACTOR_TO_CATEGORY.get(f, "Other"),
+                "z_score": round(z, 4),
+                "sign": 1 if z >= 0 else -1,
+            }
+            for f, z in ranked[:top_n]
+        ]
+        category_scores = {
+            cat: round(float(row[present].mean()), 4)
+            for cat, present in cat_to_present.items()
+        }
+        out[ticker] = {
+            "top_factors": top_factors,
+            "category_scores": category_scores,
+            "composite_signal": round(float(composite.get(ticker, 0.0)), 4),
+        }
+    return out
+
+
 def _category_balanced_composite(
     factor_z: pd.DataFrame,
     category_weights: dict[str, float] | None = None,
@@ -201,7 +258,7 @@ def _compute_rebal_weights(
     target_vol: float = 0.0,
     max_leverage: float = 1.0,
     pre_computed_regime: tuple[str, dict] | None = None,
-) -> tuple[int, pd.Timestamp, np.ndarray, str]:
+) -> tuple[int, pd.Timestamp, np.ndarray, str, dict[str, dict]]:
     """Compute optimized weights for one rebalancing date.
 
     All inputs are read-only references shared across threads.  No mutable shared
@@ -217,7 +274,8 @@ def _compute_rebal_weights(
     is pre-computed sequentially in the caller to ensure BOCPD cooldown state is
     properly threaded across rebalancing dates.
 
-    Returns (rebal_idx, rebal_date, weights, regime_state).
+    Returns (rebal_idx, rebal_date, weights, regime_state, factor_decomposition)
+    where factor_decomposition is {ticker: {top_factors, category_scores, composite_signal}}.
     """
     N = len(valid_tickers)
     rebal_date = dates[rebal_idx]
@@ -261,11 +319,15 @@ def _compute_rebal_weights(
         factors = pd.DataFrame()
 
     # Category-balanced composite signal (regime-conditional weights)
+    factor_decomposition: dict[str, dict] = {}
     if not factors.empty and len(factors) >= 3:
         factor_z = (factors - factors.mean()) / factors.std().replace(0, 1)
         factor_z = factor_z.replace([np.inf, -np.inf], 0).fillna(0)
         composite = _category_balanced_composite(factor_z, category_weights=category_weights)
         composite_aligned = composite.reindex(valid_tickers).fillna(0).values
+        factor_decomposition = _per_ticker_factor_decomposition(
+            factor_z, composite, valid_tickers, top_n=5,
+        )
     else:
         composite_aligned = np.zeros(N)
 
@@ -334,7 +396,7 @@ def _compute_rebal_weights(
                 if np.all(weights <= max_weight + 1e-10):
                     break
 
-    return rebal_idx, rebal_date, weights, regime_state
+    return rebal_idx, rebal_date, weights, regime_state, factor_decomposition
 
 
 # ── Strategy class ────────────────────────────────────────────────────────────
@@ -627,14 +689,19 @@ class SecondTowerStrategy:
             )
 
         raw_results: dict[int, tuple[pd.Timestamp, np.ndarray]] = {}
+        last_factor_decomposition: dict[str, dict] = {}
+        last_factor_decomp_ri: int = -1
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_map = {executor.submit(_submit, ri): ri for ri in rebal_indices}
             for future in as_completed(future_map):
                 ri = future_map[future]
                 try:
-                    _, rebal_date, weights, regime_name = future.result()
+                    _, rebal_date, weights, regime_name, fdecomp = future.result()
                     raw_results[ri] = (rebal_date, weights)
+                    if ri > last_factor_decomp_ri:
+                        last_factor_decomp_ri = ri
+                        last_factor_decomposition = fdecomp
                     # Update regime_labels for non-regime-detection runs
                     if dates[ri] not in regime_labels:
                         regime_labels[dates[ri]] = regime_name
@@ -882,6 +949,7 @@ class SecondTowerStrategy:
             "use_tiered_deleveraging": self.use_tiered_deleveraging,
             "regime_labels": regime_labels,
             "regime_weight_snapshots": regime_weight_snapshots,
+            "per_ticker_factor_decomposition": last_factor_decomposition,
         }
 
 

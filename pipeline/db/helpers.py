@@ -142,8 +142,17 @@ def store_recommendations(
     """Insert per-ticker recommendations from Agent C output.
 
     Each ticker entry becomes a row in the recommendations table.
-    conviction_weight is null (computed later by Position Sizing Engine).
-    key_quant_metrics stores Agent B metrics; key_risk_factors stores Agent C risk list.
+
+    `conviction_scores` (repurposed): JSON of Agent B's quant signals that
+        produced the weight — `{factor_drivers: [...], category_scores: {...},
+        composite_signal: float}`. The legacy narrative_score / multiplier
+        fields are no longer written; weights are 100% deterministic from
+        Agent B and LLMs cannot scale them.
+    `conviction_weight`: legacy column, set to 1.0 (no longer used by sizing).
+    `key_quant_metrics`: drift / volatility / health_score / current_weight /
+        flags from Agent B (unchanged).
+    `key_risk_factors`: Agent C's risk list (unchanged).
+
     Returns list of recommendation_ids.
     """
     from datetime import datetime, timezone
@@ -153,16 +162,17 @@ def store_recommendations(
     per_ticker_quant = (quant_assessment or {}).get("per_ticker", {})
 
     for ticker, entry in per_ticker.items():
-        # Extract real Agent B metrics for this ticker
         quant_data = per_ticker_quant.get(ticker, {})
         quant_metrics = {
             k: quant_data.get(k)
             for k in ("drift", "volatility_30d", "health_score", "current_weight", "flags")
             if quant_data.get(k) is not None
         }
-
-        ns = float(entry.get("narrative_score", 5.0))
-        multiplier = round(0.5 + max(0.0, min(10.0, ns)) / 10.0, 4)
+        conviction_payload = {
+            "factor_drivers": quant_data.get("factor_drivers", []),
+            "category_scores": quant_data.get("category_scores", {}),
+            "composite_signal": quant_data.get("composite_signal", 0.0),
+        }
 
         cursor = conn.execute(
             """INSERT INTO recommendations
@@ -175,8 +185,8 @@ def store_recommendations(
                 ts,
                 ticker,
                 entry["action"],
-                json.dumps({"narrative_score": ns, "multiplier": multiplier}),
-                multiplier,
+                json.dumps(conviction_payload),
+                1.0,
                 entry.get("rationale", ""),
                 json.dumps(quant_metrics) if quant_metrics else None,
                 json.dumps(entry.get("key_risk_factors", [])),

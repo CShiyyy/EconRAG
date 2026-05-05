@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pipeline.agents.agent_c import (
+    _SYSTEM,
+    _format_agent_b_weights_context,
     _validate_output,
     _validate_per_ticker,
     _validate_standing_actions,
@@ -51,12 +53,10 @@ def _valid_decision_output(tickers=None):
     tickers = tickers or TICKERS
     per_ticker = {}
     actions = ["Buy", "Hold"]
-    scores = [7.5, 5.0]
     for i, t in enumerate(tickers):
         per_ticker[t] = {
             "action": actions[i % len(actions)],
-            "narrative_score": scores[i % len(scores)],
-            "rationale": f"Decision reasoning for {t}.",
+            "rationale": f"Decision reasoning for {t}: MOM12M z=+1.5 drives the weight.",
             "key_risk_factors": ["sector risk"],
         }
     return {"per_ticker": per_ticker}
@@ -69,7 +69,6 @@ def _valid_first_run_output(tickers=None):
     for t in tickers:
         per_ticker[t] = {
             "action": "Buy",
-            "narrative_score": 7.0,
             "rationale": f"Compelling initial position for {t}.",
             "key_risk_factors": ["new position risk"],
         }
@@ -282,18 +281,6 @@ class TestValidation:
         valid, _ = _validate_output(output, "decision")
         assert valid is False
 
-    def test_decision_rejects_missing_narrative_score(self):
-        output = _valid_decision_output()
-        del output["per_ticker"]["AAPL"]["narrative_score"]
-        valid, _ = _validate_output(output, "decision")
-        assert valid is False
-
-    def test_decision_rejects_out_of_range_narrative_score(self):
-        output = _valid_decision_output()
-        output["per_ticker"]["AAPL"]["narrative_score"] = 11.0
-        valid, _ = _validate_output(output, "decision")
-        assert valid is False
-
     def test_rejects_invalid_action(self):
         output = _valid_decision_output()
         output["per_ticker"]["AAPL"]["action"] = "InvalidAction"
@@ -369,7 +356,8 @@ class TestDegradedOutput:
         result = _degraded_output(["AAPL"], "decision")
         entry = result["per_ticker"]["AAPL"]
         assert entry["action"] == "Hold"
-        assert entry["narrative_score"] == 5.0
+        # narrative_score must NOT appear — weights are deterministic from Agent B.
+        assert "narrative_score" not in entry
         assert "failed" in entry["rationale"].lower()
 
 
@@ -395,7 +383,8 @@ class TestPostCloseMode:
         assert "per_ticker" in result
         for entry in result["per_ticker"].values():
             assert entry["action"] in {"Buy", "Hold", "Trim", "Exit"}
-            assert isinstance(entry["narrative_score"], float)
+            assert isinstance(entry["rationale"], str) and entry["rationale"]
+            assert "narrative_score" not in entry
 
     @pytest.mark.asyncio
     async def test_post_close_stored_to_agent_outputs(self, db_conn):
@@ -448,8 +437,8 @@ class TestDecisionMode:
         assert "per_ticker" in result
         for entry in result["per_ticker"].values():
             assert entry["action"] in {"Buy", "Hold", "Trim", "Exit"}
-            assert isinstance(entry["narrative_score"], float)
-            assert 0.0 <= entry["narrative_score"] <= 10.0
+            assert isinstance(entry["rationale"], str) and entry["rationale"]
+            assert "narrative_score" not in entry
 
     @pytest.mark.asyncio
     async def test_decision_with_standing_actions(self, db_conn):
@@ -487,8 +476,9 @@ class TestFirstRunMode:
         )
 
         for entry in result["per_ticker"].values():
-            assert "narrative_score" in entry
-            assert isinstance(entry["narrative_score"], float)
+            assert entry["action"] in {"Buy", "Hold", "Trim", "Exit"}
+            assert isinstance(entry["rationale"], str) and entry["rationale"]
+            assert "narrative_score" not in entry
 
     @pytest.mark.asyncio
     async def test_first_run_recommends_from_watchlist(self, db_conn):
@@ -545,8 +535,9 @@ class TestRetryAndDegradedOutput:
         )
 
         for entry in result["per_ticker"].values():
-            assert entry["narrative_score"] == 5.0
+            assert entry["action"] == "Hold"
             assert "failed" in entry["rationale"].lower()
+            assert "narrative_score" not in entry
 
     @pytest.mark.asyncio
     async def test_degraded_on_timeout(self, db_conn):
@@ -600,13 +591,34 @@ class TestStoreRecommendations:
         tickers = {r["ticker"] for r in rows}
         assert tickers == {"AAPL", "NVDA"}
 
-    def test_stores_narrative_score_and_multiplier(self, db_conn):
+    def test_stores_factor_drivers_from_quant_assessment(self, db_conn):
+        """conviction_scores is repurposed to carry Agent B's factor decomposition."""
         run_id = _seed_run_log(db_conn)
         per_ticker = {
-            "AAPL": {"action": "Buy", "narrative_score": 8.0, "rationale": "test", "key_risk_factors": []},
-            "MSFT": {"action": "Hold", "narrative_score": 5.0, "rationale": "test", "key_risk_factors": []},
+            "AAPL": {"action": "Buy",  "rationale": "MOM12M strong", "key_risk_factors": []},
+            "MSFT": {"action": "Hold", "rationale": "neutral",       "key_risk_factors": []},
         }
-        store_recommendations(db_conn, run_id, per_ticker)
+        quant = {
+            "per_ticker": {
+                "AAPL": {
+                    "drift": 0.02, "volatility_30d": 0.25, "health_score": "normal",
+                    "current_weight": 0.10, "flags": [],
+                    "factor_drivers": [
+                        {"factor": "MOM12M", "category": "Momentum", "z_score": 2.1, "sign": 1},
+                    ],
+                    "category_scores": {"Momentum": 1.8, "Value": -0.1},
+                    "composite_signal": 0.9,
+                },
+                "MSFT": {
+                    "drift": 0.0, "volatility_30d": 0.22, "health_score": "normal",
+                    "current_weight": 0.05, "flags": [],
+                    "factor_drivers": [],
+                    "category_scores": {},
+                    "composite_signal": 0.0,
+                },
+            }
+        }
+        store_recommendations(db_conn, run_id, per_ticker, quant_assessment=quant)
 
         rows = db_conn.execute(
             "SELECT ticker, conviction_scores, conviction_weight FROM recommendations WHERE run_id = ?",
@@ -615,28 +627,36 @@ class TestStoreRecommendations:
         by_ticker = {r["ticker"]: r for r in rows}
 
         aapl_scores = json.loads(by_ticker["AAPL"]["conviction_scores"])
-        assert aapl_scores["narrative_score"] == 8.0
-        assert aapl_scores["multiplier"] == 1.3
-        assert by_ticker["AAPL"]["conviction_weight"] == 1.3
+        assert aapl_scores["factor_drivers"][0]["factor"] == "MOM12M"
+        assert aapl_scores["category_scores"]["Momentum"] == 1.8
+        assert aapl_scores["composite_signal"] == 0.9
+        # conviction_weight is now a placeholder 1.0 — narrative no longer scales sizing.
+        assert by_ticker["AAPL"]["conviction_weight"] == 1.0
+        # No legacy narrative_score / multiplier keys.
+        assert "narrative_score" not in aapl_scores
+        assert "multiplier" not in aapl_scores
 
         msft_scores = json.loads(by_ticker["MSFT"]["conviction_scores"])
-        assert msft_scores["narrative_score"] == 5.0
-        assert msft_scores["multiplier"] == 1.0
+        assert msft_scores["factor_drivers"] == []
         assert by_ticker["MSFT"]["conviction_weight"] == 1.0
 
-    def test_assessment_entries_use_default_neutral_score(self, db_conn):
-        """Assessment entries (no narrative_score) default to 5.0 → multiplier 1.0."""
+    def test_no_quant_assessment_yields_empty_factor_payload(self, db_conn):
+        """When quant_assessment is omitted (e.g. pre-Agent-B path), conviction_scores
+        still gets a stable shape — empty drivers/categories — and conviction_weight=1.0."""
         run_id = _seed_run_log(db_conn)
-        per_ticker = _valid_assessment_output()["per_ticker"]
-        store_recommendations(db_conn, run_id, per_ticker)
+        per_ticker = {
+            "AAPL": {"action": "Hold", "rationale": "no quant", "key_risk_factors": []},
+        }
+        store_recommendations(db_conn, run_id, per_ticker, quant_assessment=None)
 
         row = db_conn.execute(
             "SELECT conviction_scores, conviction_weight FROM recommendations WHERE ticker = 'AAPL' AND run_id = ?",
             (run_id,),
         ).fetchone()
         scores = json.loads(row["conviction_scores"])
-        assert scores["narrative_score"] == 5.0
-        assert scores["multiplier"] == 1.0
+        assert scores["factor_drivers"] == []
+        assert scores["category_scores"] == {}
+        assert scores["composite_signal"] == 0.0
         assert row["conviction_weight"] == 1.0
 
 
@@ -686,6 +706,51 @@ class TestSanitizeJsonText:
         raw = '{"per_ticker": {"NVDA": {"nested": "}"}}} trailing garbage'
         result = json.loads(_sanitize_json_text(raw))
         assert result["per_ticker"]["NVDA"]["nested"] == "}"
+
+
+class TestFactorDisplayNames:
+    """Factor codes must be translated to plain English in user-facing text."""
+
+    def test_format_agent_b_weights_uses_display_names(self):
+        agent_b_output = {
+            "per_ticker": {
+                "NVDA": {
+                    "current_weight": 0.08,
+                    "target_weight": 0.14,
+                    "drift": -0.06,
+                    "volatility_30d": 0.35,
+                    "health_score": "normal",
+                    "flags": ["buy_candidate"],
+                    "composite_signal": 0.9,
+                    "category_scores": {"Momentum": 1.8, "Quality": 1.4},
+                    "factor_drivers": [
+                        {"factor": "MOM12M", "category": "Momentum", "z_score": 2.1},
+                        {"factor": "ROE", "category": "Quality", "z_score": 1.7},
+                        {"factor": "IVOL", "category": "Risk", "z_score": 1.2},
+                    ],
+                }
+            }
+        }
+        text = _format_agent_b_weights_context(agent_b_output)
+        assert "12-month price momentum" in text
+        assert "return on equity" in text
+        assert "idiosyncratic volatility" in text
+        # Bare code identifiers must NOT appear in the rendered driver list.
+        # (We check word boundaries — "MOM12M" should not appear at all.)
+        assert "MOM12M" not in text
+        assert "ROE" not in text
+        assert "IVOL" not in text
+
+    def test_system_prompt_forbids_code_identifiers(self):
+        # The example block must not demonstrate code identifiers; instructions
+        # call them out as forbidden but only inside the "NEVER use ..." rule.
+        # Easiest check: the worked rationale example uses English names.
+        assert "12-month price momentum" in _SYSTEM
+        assert "return on equity" in _SYSTEM
+        # The example rationale must not include the old code-identifier form.
+        assert "MOM12M (z=" not in _SYSTEM
+        assert "ROE (z=" not in _SYSTEM
+        assert "IVOL=" not in _SYSTEM
 
 
 class TestRetryOnEmptyPerTicker:

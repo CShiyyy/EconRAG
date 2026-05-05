@@ -1,7 +1,10 @@
-"""Agent C — Cloud LLM Portfolio Synthesizer.
+"""Agent C — Cloud LLM Portfolio Rationalizer.
 
-Operates in decision mode: produces per-ticker narrative_score (0-10) which
-the sizing engine uses as a multiplier on Agent B's quantitative weights.
+Pure-rationalizer mode: weights are 100% set by Agent B's optimizer. Agent C
+consumes Agent B's per-ticker factor decomposition + Agent A's narrative
+context and produces human-readable rationale explaining *why* the quant
+model assigned its weights, grounded in real-world events. Produces NO
+numeric output that affects sizing.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import sqlite3
 from typing import Any
 
 from pipeline.agents.cloud_client import CloudAuthError, CloudLLMClient, CloudTimeoutError, create_cloud_client
+from pipeline.agents.second_tower.factor_names import factor_display_name
 from pipeline.db.helpers import (
     get_account,
     get_active_standing_events,
@@ -105,18 +109,42 @@ def _format_agent_b_context(agent_b_output: dict) -> str:
 
 
 def _format_agent_b_weights_context(agent_b_output: dict) -> str:
-    """Format Agent B target weights for the unified prompt."""
+    """Format Agent B target weights + per-ticker factor drivers for the prompt.
+
+    The factor drivers are the quantitative signals (Z-scores) that drove the
+    optimizer's decision. They are the primary substrate Agent C uses to
+    construct rationale.
+    """
     per_ticker = (agent_b_output or {}).get("per_ticker", {})
     if not per_ticker:
         return "QUANTITATIVE WEIGHTS: No data available."
-    lines = ["QUANTITATIVE OPTIMIZER TARGET WEIGHTS (Second Tower multi-factor):"]
+    lines = ["QUANTITATIVE OPTIMIZER OUTPUT (Second Tower multi-factor):"]
     for ticker, data in sorted(per_ticker.items()):
         tw = data.get("target_weight", 0.0)
+        cw = data.get("current_weight", 0.0)
+        drift = data.get("drift", 0.0)
         vol = data.get("volatility_30d", 0.0)
         health = data.get("health_score", "")
+        flags = data.get("flags", [])
+        composite = data.get("composite_signal", 0.0)
+        cat_scores = data.get("category_scores", {})
+        drivers = data.get("factor_drivers", [])
+
         lines.append(
-            f"  {ticker}: target_weight={tw:.4f}, vol_30d={vol:.4f}, health={health}"
+            f"  {ticker}: target_weight={tw:.4f} (current={cw:.4f}, drift={drift:+.4f}), "
+            f"vol_30d={vol:.4f}, health={health}, flags={flags}"
         )
+        if drivers:
+            driver_strs = [
+                f"{factor_display_name(d.get('factor'))} (z={d.get('z_score'):+.2f}, {d.get('category')})"
+                for d in drivers
+            ]
+            lines.append(f"    top_factor_drivers: {', '.join(driver_strs)}")
+        if cat_scores:
+            cat_strs = [f"{cat}={score:+.2f}" for cat, score in cat_scores.items()]
+            lines.append(
+                f"    category_scores: {', '.join(cat_strs)} (composite={composite:+.2f})"
+            )
     return "\n".join(lines)
 
 
@@ -164,35 +192,53 @@ def _format_source_health(source_health: list[dict]) -> str:
 
 
 _SYSTEM = """\
-You are a narrative moderator for a quantitative portfolio manager. \
-A Second Tower mean-variance optimizer (Agent B) has already computed target weights \
-for each ticker based on multi-factor signals (momentum, value, quality, risk). \
-Your job is to moderate those weights using qualitative narrative evidence from Agent A.
+You are a quant strategist's communicator. A Second Tower mean-variance optimizer \
+(Agent B) has already computed final target weights for each ticker from 63 \
+cross-sectional factors grouped into six categories (Momentum, Value, Quality, \
+Technical, Risk, Accruals). Those weights are FINAL — your output does NOT and \
+CANNOT change them.
+
+Your sole job: for each ticker, write a clear, evidence-grounded rationale that \
+EXPLAINS WHY THE OPTIMIZER PICKED THAT WEIGHT, by translating the top quantitative \
+factor drivers (Z-scores) into real-world economic / news / standing-event context \
+using Agent A's narrative and the standing event list.
 
 For each ticker produce a JSON entry with:
-  - narrative_score: float 0–10 (see scale below)
-  - action: "Buy" | "Hold" | "Trim" | "Exit" (for display only — does not affect weights)
-  - rationale: 7–10 sentences citing Agent A narrative evidence for this ticker, \
-comparing its narrative to peers in the watchlist, referencing Agent B's target_weight, \
-and assessing the primary risk to the thesis
-  - key_risk_factors: list of 2–3 specific risks
-
-NARRATIVE SCORE SCALE:
-  8–10 → multiplier 1.30–1.50× — strong positive: clear bullish catalysts, high confidence
-  6–7  → multiplier 1.10–1.20× — mild positive: net positive, mixed or thin evidence
-  5    → multiplier 1.00×       — neutral: no directional signal, Agent B weight unchanged
-  3–4  → multiplier 0.80–0.90× — mild negative: headwinds or deteriorating narrative
-  0–2  → multiplier 0.50–0.70× — strong negative: clear bearish catalysts
+  - action: "Buy" | "Hold" | "Trim" | "Exit"  — display label only.
+      Buy   = target_weight materially above current_weight (or new position).
+      Trim  = target_weight materially below current_weight (held tickers only).
+      Exit  = target_weight ≈ 0 for a held ticker (held tickers only).
+      Hold  = anything else.
+  - rationale: 5–8 sentences. MUST:
+      1. Cite at least 2 of the top_factor_drivers using their full
+         human-readable English names (exactly as written in the
+         top_factor_drivers list — e.g., "12-month price momentum",
+         "return on equity", "On-Balance Volume trend"). NEVER use the
+         underlying code identifiers (e.g., MOM12M, MOM12M1, CONSEC_UP, OBV,
+         RSI14, MACD, BB_POS, ATR_NORM, IVOL, ROE, ADX, STOCH, CCI,
+         WILLIAMS_R, MA50_200) and NEVER write a raw Z-score number — instead
+         translate the Z-score sign and magnitude into plain language
+         ("strongly positive", "moderately negative", "near zero", etc.).
+      2. Translate those factors into plain-English economic meaning
+         (e.g., "12-month price momentum is strongly positive, meaning NVDA is
+         in the top of the cross-section for trailing-year price strength").
+      3. Connect the quant picture to Agent A's narrative or a standing event
+         when possible — corroboration OR contradiction is valuable signal.
+      4. Reference target_weight, current_weight, and drift to explain the
+         action label.
+  - key_risk_factors: list of 2–3 specific risks (a mix of quant tail-risks
+    surfaced by the Risk category and qualitative risks from Agent A is ideal).
+    Use plain English names here too — e.g., "elevated idiosyncratic
+    volatility", not "IVOL".
 
 RULES:
-- You MUST produce a per_ticker entry for EVERY ticker in the WATCHLIST plus every ticker \
-in CURRENT HOLDINGS.
+- You MUST produce a per_ticker entry for EVERY ticker in the WATCHLIST plus every \
+ticker in CURRENT HOLDINGS.
 - Use ONLY the exact ticker symbols provided. Do NOT invent tickers.
-- Use the FULL 0–10 range to differentiate tickers. Do NOT cluster all scores near 5.
-- A ticker with Agent B target_weight=0 will receive zero allocation regardless of score; \
-still score it honestly for the record.
 - "Trim" and "Exit" are valid ONLY for tickers that appear in CURRENT HOLDINGS.
 - Never emit "Trim" or "Exit" for a ticker not in CURRENT HOLDINGS.
+- DO NOT emit a narrative_score, multiplier, conviction_score, or any other numeric \
+field — your rationale is qualitative only.
 - standing_event_actions is optional — omit or leave arrays empty if none warranted.
 - Respond with ONLY valid JSON, no additional text, no markdown fences.
 
@@ -200,9 +246,8 @@ OUTPUT SCHEMA:
 {
   "per_ticker": {
     "TICKER": {
-      "narrative_score": 7.5,
       "action": "Buy | Hold | Trim | Exit",
-      "rationale": "7-10 sentences...",
+      "rationale": "5-8 sentences citing factor drivers and narrative context...",
       "key_risk_factors": ["risk1", "risk2"]
     }
   },
@@ -220,16 +265,14 @@ EXAMPLE (2 tickers):
 {
   "per_ticker": {
     "NVDA": {
-      "narrative_score": 8.5,
       "action": "Buy",
-      "rationale": "NVDA commands the strongest narrative in the watchlist. Agent A highlights accelerating data centre order flow and multiple sell-side upgrades overnight, with high confidence in the bullish read. Compared to other Information Technology names in the watchlist, NVDA has the most specific near-term catalyst. Agent B assigns a 14% target weight reflecting strong multi-factor momentum and quality scores. The narrative reinforces rather than contradicts the quant signal — both point to continued outperformance. Supply chain risk is the primary concern given Taiwan concentration. Export restriction escalation remains a tail risk but is not the current consensus expectation. Overall the combined evidence strongly supports increasing exposure.",
-      "key_risk_factors": ["export restriction escalation", "Taiwan supply chain concentration"]
+      "rationale": "Agent B assigns NVDA a 14% target weight versus an 8% current weight (a +6% gap), consistent with very strong Momentum and Quality category scores. The dominant drivers are 12-month price momentum (strongly positive) and return on equity (clearly positive), meaning NVDA is in the top of the cross-section both for trailing-year price strength and for capital efficiency. Agent A's narrative reinforces this: accelerating data-centre orders and multiple sell-side upgrades overnight. Risk-category factors flag elevated idiosyncratic volatility, so the quant has accepted higher single-name risk for the alpha. The narrative does not contradict the quant — both point the same way.",
+      "key_risk_factors": ["elevated idiosyncratic volatility", "Taiwan supply chain concentration"]
     },
     "KO": {
-      "narrative_score": 4.5,
       "action": "Hold",
-      "rationale": "KO narrative is mildly negative. Agent A finds limited recent coverage with the most recent theme being volume softness in emerging markets and FX headwinds. Among Consumer Staples names in the watchlist, KO ranks below average on narrative momentum. Agent B assigns a 0% target weight reflecting weak quantitative signals. The narrative is consistent with the quant view — neither provides a reason to initiate. Confidence in the narrative read is moderate given thin coverage. The stock offers defensiveness but no near-term catalyst. A score of 4.5 reflects mild negative narrative without a clear bear thesis.",
-      "key_risk_factors": ["EM volume softness", "FX headwinds on repatriation"]
+      "rationale": "Agent B sets KO's target weight to 0% with current_weight already at 0%, so no trade is implied. The factor picture is unremarkable, with no individual driver showing a meaningful signal in either direction. The Quality category is mildly positive — reflecting steady margins — but Momentum and Value are both modestly negative, so there is neither catalyst nor cheapness. Agent A finds thin recent coverage; the most-mentioned theme is emerging-market volume softness and FX headwinds, which is consistent with the soft momentum reading. The narrative agrees with the quant: no compelling reason to initiate.",
+      "key_risk_factors": ["emerging-market volume softness", "FX headwinds on repatriation"]
     }
   }
 }"""
@@ -349,15 +392,11 @@ def _normalize_response(data: dict, known_tickers: set[str] | None = None) -> di
             if lower in ("hold", "buy", "trim", "exit"):
                 entry["action"] = lower.capitalize()
 
-        # Coerce narrative_score to float in [0, 10]; default 5.0 (neutral).
-        ns = entry.get("narrative_score")
-        if ns is not None:
-            try:
-                entry["narrative_score"] = max(0.0, min(10.0, float(ns)))
-            except (TypeError, ValueError):
-                entry["narrative_score"] = 5.0
-        else:
-            entry["narrative_score"] = 5.0
+        # Strip any legacy numeric fields the LLM might emit out of habit;
+        # weights are deterministic from Agent B and these must not propagate.
+        entry.pop("narrative_score", None)
+        entry.pop("multiplier", None)
+        entry.pop("conviction_score", None)
 
         # Coerce key_risk_factors from string to list
         krf = entry.get("key_risk_factors")
@@ -386,13 +425,6 @@ def _validate_per_ticker(
         else:
             if action not in {"Buy", "Hold", "Trim", "Exit"}:
                 return False, f"ticker {ticker}: action {action!r} must be one of Buy/Hold/Trim/Exit"
-
-        if mode != "assessment":
-            ns = entry.get("narrative_score")
-            if ns is None or not isinstance(ns, (int, float)):
-                return False, f"ticker {ticker}: narrative_score missing or not numeric"
-            if not (0.0 <= float(ns) <= 10.0):
-                return False, f"ticker {ticker}: narrative_score {ns} out of range [0, 10]"
 
         if not isinstance(entry.get("rationale"), str) or not entry["rationale"]:
             return False, f"ticker {ticker}: rationale is missing or empty"
@@ -481,7 +513,6 @@ def _degraded_output(tickers: list[str], mode: str) -> dict:
             }
         else:
             per_ticker[ticker] = {
-                "narrative_score": 5.0,
                 "action": "Hold",
                 "rationale": "Cloud LLM extraction failed — using degraded output.",
                 "key_risk_factors": [],
@@ -566,12 +597,11 @@ def _build_response_schema(known_tickers: set[str], mode: str) -> dict:
         entry_schema = {
             "type": "object",
             "properties": {
-                "narrative_score": {"type": "number", "minimum": 0, "maximum": 10},
                 "action": {"type": "string", "enum": ["Buy", "Hold", "Trim", "Exit"]},
                 "rationale": {"type": "string"},
                 "key_risk_factors": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["narrative_score", "action", "rationale", "key_risk_factors"],
+            "required": ["action", "rationale", "key_risk_factors"],
         }
 
     sorted_tickers = sorted(known_tickers)

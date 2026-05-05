@@ -293,7 +293,7 @@ async def run_agent_b(
     rebal_idx = len(dates) - 1
 
     # 4. Compute latest target weights (single-date live mode)
-    _, _, weights, _ = _compute_rebal_weights(
+    _, _, weights, _, factor_decomposition = _compute_rebal_weights(
         rebal_idx=rebal_idx,
         dates=dates,
         train_days=train_days,
@@ -349,30 +349,35 @@ async def run_agent_b(
         cur_w = current_weights.get(ticker, 0.0)
         tgt_w = target_weights.get(ticker, 0.0)
         prev_tgt_w = previous_targets.get(ticker, {}).get("target_weight", 0.0)
-        drift = cur_w - tgt_w
 
         vol_30d = _vol_30d(ohlcv_data.get(ticker))
 
-        # Health score: based on |drift| vs second tower target
-        if abs(drift) >= DRIFT_BREACH_THRESHOLD:
-            health = "breach"
-        elif abs(drift) >= DRIFT_WARNING_THRESHOLD:
-            health = "warning"
-        else:
+        # Drift only applies to existing positions. With no current allocation
+        # there is nothing to drift from — the gap between 0 and target_weight
+        # is a "new position" signal, conveyed via the buy_candidate flag below.
+        flags: list[str] = []
+        if cur_w <= 0.0:
+            drift = 0.0
             health = "normal"
+        else:
+            drift = cur_w - tgt_w
+            if abs(drift) >= DRIFT_BREACH_THRESHOLD:
+                health = "breach"
+                flags.append("drift_breach")
+            elif abs(drift) >= DRIFT_WARNING_THRESHOLD:
+                health = "warning"
+                flags.append("drift_above_threshold")
+            else:
+                health = "normal"
         health_scores[ticker] = health
 
-        flags: list[str] = []
-        if abs(drift) >= DRIFT_BREACH_THRESHOLD:
-            flags.append("drift_breach")
-        elif abs(drift) >= DRIFT_WARNING_THRESHOLD:
-            flags.append("drift_above_threshold")
         if tgt_w > 0.01 and cur_w == 0.0:
             flags.append("buy_candidate")
         elif tgt_w > cur_w + DRIFT_WARNING_THRESHOLD:
             flags.append("new_position_suggested")
 
         sector = ticker_sector_map.get(ticker, sector_map.get(ticker, "Unknown"))
+        fdecomp = factor_decomposition.get(ticker, {})
         per_ticker_output[ticker] = {
             "current_weight": round(cur_w, 6),
             "previous_target_weight": round(prev_tgt_w, 6),
@@ -382,6 +387,9 @@ async def run_agent_b(
             "sector": sector,
             "health_score": health,
             "flags": flags,
+            "factor_drivers": fdecomp.get("top_factors", []),
+            "category_scores": fdecomp.get("category_scores", {}),
+            "composite_signal": fdecomp.get("composite_signal", 0.0),
         }
 
     # 8. Portfolio-level metrics

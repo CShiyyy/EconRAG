@@ -5,7 +5,6 @@ import math
 
 import pytest
 
-from pipeline.sizing.conviction_map import narrative_multiplier
 from pipeline.sizing.normalizer import (
     cap_sector_concentrations,
     cap_single_positions,
@@ -82,33 +81,6 @@ def _insert_run_log(conn, run_type="pre_open"):
     )
     conn.commit()
     return cursor.lastrowid
-
-
-# ---------------------------------------------------------------------------
-# Test: Narrative Multiplier
-# ---------------------------------------------------------------------------
-
-class TestNarrativeMultiplier:
-    def test_score_5_is_neutral(self):
-        assert narrative_multiplier(5.0) == 1.0
-
-    def test_score_10_is_max(self):
-        assert abs(narrative_multiplier(10.0) - 1.5) < 1e-9
-
-    def test_score_0_is_min(self):
-        assert abs(narrative_multiplier(0.0) - 0.5) < 1e-9
-
-    def test_score_above_10_clamped(self):
-        assert abs(narrative_multiplier(15.0) - 1.5) < 1e-9
-
-    def test_score_below_0_clamped(self):
-        assert abs(narrative_multiplier(-5.0) - 0.5) < 1e-9
-
-    def test_score_7_5(self):
-        assert abs(narrative_multiplier(7.5) - 1.25) < 1e-9
-
-    def test_score_2_5(self):
-        assert abs(narrative_multiplier(2.5) - 0.75) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -382,12 +354,15 @@ class TestComputedTargets:
 
 
 # ---------------------------------------------------------------------------
-# Test: Full Engine — narrative modulation
+# Test: Full Engine — weights sourced exclusively from Agent B
 # ---------------------------------------------------------------------------
 
-class TestEngineNarrativeModulation:
-    def test_zero_agent_b_weight_stays_zero_regardless_of_narrative_score(self, db_conn):
-        """A ticker with Agent B weight=0 gets weight=0 even if narrative_score is 10."""
+class TestEngineWeightSourcing:
+    """Branch `rationale-model-agent-b`: weights are 100% deterministic from
+    Agent B's optimizer. Agent C output cannot scale them."""
+
+    def test_zero_agent_b_weight_stays_zero(self, db_conn):
+        """A ticker with Agent B weight=0 gets weight=0, period — no LLM upside."""
         _init_account(db_conn, cash=100_000.0)
         _insert_constraints(db_conn)
         _insert_watchlist(db_conn, [
@@ -405,9 +380,9 @@ class TestEngineNarrativeModulation:
             }
         }
         agent_c_output = {
-            "AAPL": {"action": "Buy",  "narrative_score": 8.0},
-            "MSFT": {"action": "Buy",  "narrative_score": 6.0},
-            "JPM":  {"action": "Buy",  "narrative_score": 10.0},  # high score, zero B weight
+            "AAPL": {"action": "Buy"},
+            "MSFT": {"action": "Buy"},
+            "JPM":  {"action": "Buy"},  # bullish narrative cannot revive a zero B weight
         }
         fill_prices = {"AAPL": 150.0, "MSFT": 300.0, "JPM": 200.0}
 
@@ -420,8 +395,10 @@ class TestEngineNarrativeModulation:
         assert result["target_weights"].get("AAPL", 0.0) > 0.0
         assert result["target_weights"].get("MSFT", 0.0) > 0.0
 
-    def test_high_narrative_score_amplifies_weight(self, db_conn):
-        """Ticker with narrative_score=10 gets larger weight than same B-weight at score=5."""
+    def test_agent_c_action_does_not_scale_weights(self, db_conn):
+        """Two tickers with identical Agent B target_weights get identical
+        normalized weights regardless of Agent C action labels — narrative
+        no longer modulates."""
         _init_account(db_conn, cash=100_000.0)
         _insert_constraints(db_conn)
         _insert_watchlist(db_conn, [
@@ -437,8 +414,8 @@ class TestEngineNarrativeModulation:
             }
         }
         agent_c_output = {
-            "AAPL": {"action": "Buy",  "narrative_score": 10.0},
-            "MSFT": {"action": "Hold", "narrative_score": 5.0},
+            "AAPL": {"action": "Buy"},   # different label
+            "MSFT": {"action": "Hold"},  # different label
         }
         fill_prices = {"AAPL": 150.0, "MSFT": 300.0}
 
@@ -447,8 +424,42 @@ class TestEngineNarrativeModulation:
             agent_b_output=agent_b_output,
         )
 
-        # AAPL raw=0.10×1.5=0.15, MSFT raw=0.10×1.0=0.10 → AAPL outweighs MSFT
-        assert result["target_weights"]["AAPL"] > result["target_weights"]["MSFT"]
+        # Equal raw scores (both = b_weight = 0.10) survive as equal targets.
+        assert math.isclose(
+            result["target_weights"]["AAPL"],
+            result["target_weights"]["MSFT"],
+            abs_tol=1e-9,
+        )
+
+    def test_raw_score_equals_agent_b_target_weight(self, db_conn):
+        """Engine surfaces raw_score = agent_b.target_weight in per_ticker_data."""
+        _init_account(db_conn, cash=100_000.0)
+        _insert_constraints(db_conn)
+        _insert_watchlist(db_conn, [
+            ("AAPL", "Apple", "Information Technology"),
+            ("MSFT", "Microsoft", "Information Technology"),
+        ])
+        run_id = _insert_run_log(db_conn)
+
+        agent_b_output = {
+            "per_ticker": {
+                "AAPL": {"target_weight": 0.12, "volatility_30d": 0.25, "health_score": "normal", "flags": []},
+                "MSFT": {"target_weight": 0.07, "volatility_30d": 0.22, "health_score": "normal", "flags": []},
+            }
+        }
+        agent_c_output = {
+            "AAPL": {"action": "Buy"},
+            "MSFT": {"action": "Hold"},
+        }
+        fill_prices = {"AAPL": 150.0, "MSFT": 300.0}
+
+        result = run_sizing_engine(
+            db_conn, run_id, agent_c_output, fill_prices,
+            agent_b_output=agent_b_output,
+        )
+
+        assert math.isclose(result["per_ticker_data"]["AAPL"]["raw_score"], 0.12, abs_tol=1e-9)
+        assert math.isclose(result["per_ticker_data"]["MSFT"]["raw_score"], 0.07, abs_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +480,8 @@ class TestEngineAllExit:
         run_id = _insert_run_log(db_conn)
 
         agent_c_output = {
-            "AAPL": {"action": "Exit", "narrative_score": 2.0},
-            "MSFT": {"action": "Exit", "narrative_score": 2.0},
+            "AAPL": {"action": "Exit"},
+            "MSFT": {"action": "Exit"},
         }
         fill_prices = {"AAPL": 150.0, "MSFT": 300.0}
 

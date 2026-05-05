@@ -3,13 +3,34 @@ import { Link } from 'react-router-dom';
 import LoadingSpinner from '../components/shared/LoadingSpinner';
 import EmptyState from '../components/shared/EmptyState';
 import Badge from '../components/shared/Badge';
+import ExpandableRow from '../components/shared/ExpandableRow';
 import ConvictionScores from '../components/conviction/ConvictionScores';
 import { getLatestRunRecommendations, getRecommendationsForDate, getRecommendationDates } from '../api/recommendations';
+import { getProfile } from '../api/profiles';
 import { ACTION_VARIANT } from '../lib/badgeVariants';
 
 function SortIcon({ active, dir }) {
   if (!active) return <span className="ml-1 text-gray-300">↕</span>;
   return <span className="ml-1">{dir === 'desc' ? '↓' : '↑'}</span>;
+}
+
+function ProfileBody({ entry, onMount }) {
+  useEffect(() => {
+    if (!entry) onMount();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (!entry || entry.status === 'loading') return <span>Loading profile…</span>;
+  if (entry.status === 'error') return <span className="text-gray-500">{entry.error}</span>;
+  return (
+    <div>
+      <div className="whitespace-pre-wrap text-gray-700">{entry.text}</div>
+      {entry.seededAt && (
+        <div className="text-xs text-gray-400 mt-2">
+          Seeded {new Date(entry.seededAt).toLocaleString()}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function RecommendationsPage() {
@@ -20,7 +41,24 @@ export default function RecommendationsPage() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(null);
   const [isLatest, setIsLatest] = useState(true);
-  const [sortConfig, setSortConfig] = useState({ key: 'conviction_weight', dir: 'desc' });
+  const [sortConfig, setSortConfig] = useState({ key: 'target_weight', dir: 'desc' });
+  const [profileCache, setProfileCache] = useState({});
+
+  async function ensureProfile(ticker) {
+    if (profileCache[ticker]) return;
+    setProfileCache((p) => ({ ...p, [ticker]: { status: 'loading' } }));
+    try {
+      const data = await getProfile(ticker);
+      setProfileCache((p) => ({
+        ...p,
+        [ticker]: { status: 'ready', text: data.seed_text, seededAt: data.seeded_at },
+      }));
+    } catch (e) {
+      const error =
+        e?.response?.status === 404 ? 'No profile seeded yet.' : 'Failed to load profile.';
+      setProfileCache((p) => ({ ...p, [ticker]: { status: 'error', error } }));
+    }
+  }
 
   function groupByRun(items) {
     const map = new Map();
@@ -224,8 +262,7 @@ export default function RecommendationsPage() {
                       <tr className="border-b border-gray-200">
                         <th className="text-left py-2 px-3 font-medium text-gray-600">Ticker</th>
                         <th className="text-left py-2 px-3 font-medium text-gray-600">Action</th>
-                        <th className="text-left py-2 px-3 font-medium text-gray-600">Conviction</th>
-                        <SortableTh label="Score" sortKey="conviction_weight" className="text-right" />
+                        <th className="text-left py-2 px-3 font-medium text-gray-600">Factor Drivers</th>
                         <SortableTh label="Allocation" sortKey="target_weight" className="text-right" />
                         <th className="text-left py-2 px-3 font-medium text-gray-600">Details</th>
                         <th className="text-left py-2 px-3 font-medium text-gray-600">Run</th>
@@ -240,9 +277,6 @@ export default function RecommendationsPage() {
                           </td>
                           <td className="py-2 px-3">
                             <ConvictionScores scores={r.conviction_scores} />
-                          </td>
-                          <td className="py-2 px-3 text-right text-gray-700 tabular-nums">
-                            {r.conviction_weight != null ? r.conviction_weight.toFixed(2) : '—'}
                           </td>
                           <td className="py-2 px-3 text-right text-gray-700 tabular-nums">
                             {r.target_weight != null ? `${(r.target_weight * 100).toFixed(1)}%` : '—'}
@@ -265,7 +299,7 @@ export default function RecommendationsPage() {
                       {sorted.map((r) =>
                         expanded === r.recommendation_id ? (
                           <tr key={`${r.recommendation_id}-detail`}>
-                            <td colSpan={7} className="px-3 py-3 bg-gray-50">
+                            <td colSpan={6} className="px-3 py-3 bg-gray-50">
                               <div className="text-sm space-y-2">
                                 {r.rationale && (
                                   <div>
@@ -314,6 +348,14 @@ export default function RecommendationsPage() {
                                     </ul>
                                   </div>
                                 )}
+                                <div>
+                                  <ExpandableRow summary={`Show ${r.ticker} profile`}>
+                                    <ProfileBody
+                                      entry={profileCache[r.ticker]}
+                                      onMount={() => ensureProfile(r.ticker)}
+                                    />
+                                  </ExpandableRow>
+                                </div>
                               </div>
                             </td>
                           </tr>

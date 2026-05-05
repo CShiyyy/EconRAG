@@ -65,7 +65,10 @@
       "Bash(cp \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\TradeModem\\\\backend\\\\data\\\\sec_edgar_fetcher.py\" \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\\\\sec_edgar_fetcher.py\")",
       "mcp__miro__diagram_get_dsl",
       "mcp__miro__diagram_create",
-      "mcp__miro__doc_create"
+      "mcp__miro__doc_create",
+      "Bash(grep -E \"^-.*\\\\.py$\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\shiyu\\\\Documents\\\\PersonalProjects\\\\EconRAG\\\\pipeline\\\\agents\\\\second_tower\" -Recurse -File)",
+      "Bash(Select-Object FullName)"
     ]
   },
   "hooks": {

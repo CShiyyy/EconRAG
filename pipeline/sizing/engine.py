@@ -1,10 +1,11 @@
 """Position Sizing Engine — orchestrates the full sizing pipeline.
 
 Allocation model:
-  raw_score = agent_b.target_weight × narrative_multiplier(agent_c.narrative_score)
+  raw_score = agent_b.target_weight
 
-A zero Agent B weight always produces a zero score regardless of narrative_score.
-Agent C action is retained for UX/logging only.
+Weights are 100% deterministic from Agent B's mean-variance optimizer; LLMs
+(Agents A and C) only annotate with rationale and never scale weights.
+Agent C's action label is retained for UX/logging only.
 """
 
 import logging
@@ -14,7 +15,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from pipeline.db.helpers import get_account, get_constraints
-from pipeline.sizing.conviction_map import narrative_multiplier
 from pipeline.sizing.normalizer import enforce_constraints
 from pipeline.sizing.trade_builder import (
     apply_trade,
@@ -87,7 +87,6 @@ def run_sizing_engine(
         for ticker in omitted:
             agent_c_output[ticker] = {
                 "action": "Hold",
-                "narrative_score": 5.0,
                 "rationale": "Implicit Hold: Agent C omitted this held ticker.",
                 "key_risk_factors": [],
                 "_implicit_hold": True,
@@ -98,11 +97,16 @@ def run_sizing_engine(
     actions: dict[str, str] = {}
     raw_scores: dict[str, float] = {}
 
-    for ticker, data in agent_c_output.items():
-        actions[ticker] = data["action"]
+    # Weights are sourced exclusively from Agent B's optimizer output.
+    # Iterate over the union of Agent B universe + Agent C output so we
+    # don't lose tickers that Agent B sized but Agent C didn't comment on.
+    all_scored = set(b_per_ticker.keys()) | set(agent_c_output.keys())
+    for ticker in all_scored:
         b_weight = b_per_ticker.get(ticker, {}).get("target_weight", 0.0)
-        narrative_score = float(data.get("narrative_score", 5.0))
-        raw_scores[ticker] = narrative_multiplier(narrative_score) * b_weight
+        raw_scores[ticker] = b_weight
+        c_data = agent_c_output.get(ticker)
+        if c_data and "action" in c_data:
+            actions[ticker] = c_data["action"]
 
     # Resolve sector map before constraint enforcement.
     all_tickers = list(raw_scores.keys())

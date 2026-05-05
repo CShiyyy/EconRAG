@@ -102,9 +102,10 @@ The database is the system's single source of truth. Use `PRAGMA journal_mode=WA
 - `snapshot_id` (PK), `run_id` (FK), `timestamp`, `total_value`, `cash`, `per_ticker_json` (JSON blob: ticker → shares, price, value, weight at that moment).
 - Never updated or deleted. This is the foundation for future calibration.
 
-**`recommendations`** — Agent C's raw output, stored *before* any simulated execution.
-- `recommendation_id` (PK), `run_id` (FK), `timestamp`, `ticker`, `action` (Hold/Buy/Trim/Exit/**assessment**), `conviction_scores` (JSON, see §4 Agent C output schema), `conviction_weight` (REAL, computed by Position Sizing Engine — `null` for assessment-mode entries), `rationale` (text), `key_quant_metrics` (JSON from Agent B, nullable on first run), `requery_triggered` (boolean), `requery_reason` (text, nullable).
-- Post-close assessment entries have `action: "assessment"` and `conviction_weight: null`. They record the system's end-of-day conviction state and serve as input context for the next pre-open decision run.
+**`recommendations`** — Per-ticker run output, stored *before* any simulated execution.
+- `recommendation_id` (PK), `run_id` (FK), `timestamp`, `ticker`, `action` (Hold/Buy/Trim/Exit/**assessment**), `conviction_scores` (JSON), `conviction_weight` (REAL, legacy column), `rationale` (text from Agent C), `key_quant_metrics` (JSON from Agent B, nullable on first run), `requery_triggered` (boolean), `requery_reason` (text, nullable).
+- **Branch `rationale-model-agent-b`:** `conviction_scores` JSON is `{factor_drivers: [{factor, category, z_score, sign}], category_scores: {Momentum, Value, Quality, Technical, Risk, Accruals}, composite_signal}` — the per-ticker decomposition of Agent B's optimizer signal. `conviction_weight` is set to `1.0` (placeholder, no longer used by sizing). Weights are 100% deterministic from Agent B's mean-variance optimizer; LLMs only annotate via `rationale`.
+- Post-close assessment entries have `action: "assessment"` and `conviction_weight: null`. They record the system's end-of-day state and serve as input context for the next pre-open decision run.
 
 **`trades`** — Simulated trade lifecycle table. Each trade is queued by one run and executed by the next.
 - `trade_id` (PK), `recommendation_id` (FK), `ticker`, `action`, `shares`, `fill_type`, `gap_pct` (REAL, nullable), `slippage_applied` (REAL, default 0.0), `realized_pnl` (REAL, nullable — on Trim/Exit: `(fill_price - cost_basis) × shares`), `timestamp`.
@@ -381,6 +382,15 @@ On re-query, Agent A re-runs with a **targeted query** (specific ticker + expand
 - **Model:** `Gemini 1.5 Pro` or `Claude 3.5 Sonnet`.
 - **Role:** The "Lead PM." Operates in two modes depending on run type.
 - **Receives:** Agent A's structured output (including standing context assessment), Agent B's quant JSON (or `null` on first run), source health status, current holdings, portfolio constraints. In pre-open decision mode, also receives the **previous post-close assessment** as additional context.
+
+> **Branch `rationale-model-agent-b` — pure-rationalizer mode.** Agent C no longer
+> emits `narrative_score`, multipliers, or any numeric output that affects sizing.
+> Weights are 100% determined by Agent B's mean-variance optimizer. Agent C's
+> sole job is to translate Agent B's per-ticker top factor drivers (Z-scores
+> from Momentum/Value/Quality/Technical/Risk/Accruals) into a plain-language
+> `rationale` grounded in Agent A's narrative and active standing events. The
+> position sizing engine no longer multiplies Agent B's weight by anything from
+> Agent C; raw_score = agent_b.target_weight directly.
 
 **Assessment Mode (Post-Close Runs):**
 - Evaluates end-of-day portfolio state against the full day's data.

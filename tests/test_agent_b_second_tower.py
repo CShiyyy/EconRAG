@@ -159,7 +159,7 @@ async def test_output_schema_conformance(db_conn):
         patch("pipeline.agents.agent_b.refresh_ohlcv_cache"),
         patch("pipeline.agents.agent_b.refresh_edgar_cache"),
         patch("pipeline.agents.agent_b._compute_rebal_weights",
-              return_value=(None, None, _fake_weights(n), None)),
+              return_value=(None, None, _fake_weights(n), None, {})),
         patch("pipeline.agents.agent_b._shrinkage_cov",
               return_value=_fake_cov(n)),
         patch("pipeline.agents.agent_b.get_sector_map",
@@ -218,7 +218,7 @@ async def test_side_effects_called(db_conn):
         patch("pipeline.agents.agent_b.refresh_ohlcv_cache"),
         patch("pipeline.agents.agent_b.refresh_edgar_cache"),
         patch("pipeline.agents.agent_b._compute_rebal_weights",
-              return_value=(None, None, _fake_weights(n), None)),
+              return_value=(None, None, _fake_weights(n), None, {})),
         patch("pipeline.agents.agent_b._shrinkage_cov",
               return_value=_fake_cov(n)),
         patch("pipeline.agents.agent_b.get_sector_map",
@@ -255,6 +255,51 @@ async def test_side_effects_called(db_conn):
 # ---------------------------------------------------------------------------
 # Test 4: SPY unavailable → returns None gracefully
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_no_position_drift_is_zero(db_conn):
+    """Tickers with current_weight == 0 must have drift == 0 and health 'normal'.
+
+    On a fresh portfolio (no holdings) every ticker would otherwise look like a
+    drift breach because |0 - target_weight| exceeds the breach threshold. Drift
+    is only meaningful when there is an existing allocation.
+    """
+    _seed_account(db_conn)
+    _seed_constraints(db_conn)
+    _seed_watchlist(db_conn, TICKERS)
+    _seed_run(db_conn, 1)
+    _seed_run(db_conn, 2)
+    _seed_computed_target(db_conn, 1, TICKERS)
+    _seed_ohlcv_cache(db_conn, TICKERS + ["SPY"])
+
+    n = len(TICKERS)
+    # Force a non-trivial target weight per ticker so the buy_candidate flag fires.
+    fixed_weights = np.ones(n) / n  # 0.20 each — well above DRIFT_BREACH_THRESHOLD
+
+    with (
+        patch("pipeline.agents.agent_b.refresh_ohlcv_cache"),
+        patch("pipeline.agents.agent_b.refresh_edgar_cache"),
+        patch("pipeline.agents.agent_b._compute_rebal_weights",
+              return_value=(None, None, fixed_weights, None, {})),
+        patch("pipeline.agents.agent_b._shrinkage_cov",
+              return_value=_fake_cov(n)),
+        patch("pipeline.agents.agent_b.get_sector_map",
+              return_value={t: "Information Technology" for t in TICKERS}),
+        patch("pipeline.agents.agent_b.inject_correlation_edges", new_callable=AsyncMock),
+    ):
+        result = await run_agent_b(db_conn, _mock_rag(), _make_market_data(TICKERS), 2)
+
+    assert result is not None
+    for ticker in TICKERS:
+        entry = result["per_ticker"][ticker]
+        assert entry["current_weight"] == 0.0
+        assert entry["drift"] == 0.0, f"{ticker} drift should be 0 with no position"
+        assert entry["health_score"] == "normal", f"{ticker} should not flag drift breach"
+        assert "drift_breach" not in entry["flags"]
+        assert "drift_above_threshold" not in entry["flags"]
+        # The buy_candidate signal still fires for non-trivial target weight.
+        assert "buy_candidate" in entry["flags"]
+
 
 @pytest.mark.asyncio
 async def test_spy_unavailable_returns_none(db_conn):

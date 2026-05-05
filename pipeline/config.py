@@ -43,6 +43,12 @@ OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_EMBED_DIM: int = int(os.getenv("OLLAMA_EMBED_DIM", "768"))
+# Ollama context window (num_ctx). Bumped from default 8192 so the
+# rationale-mode Agent C prompt (factor drivers + category scores +
+# Agent A narrative + standing events) fits without truncation.
+# 32768 is the working default; raise to 65536 for richer context if
+# the host has the VRAM, or drop to 16384 / 8192 to save it.
+OLLAMA_NUM_CTX: int = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 LIGHTRAG_STORAGE_DIR: Path = DATA_DIR / "lightrag_store"
 EXTRACTION_TEMPERATURE: float = 0.1
 EXTRACTION_MAX_TOKENS: int = 8192
